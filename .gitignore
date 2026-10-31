@@ -1,0 +1,27 @@
+# Rust build artifacts
+/target
+**/*.rs.bk
+*.pdb
+
+# Compiled binaries
+*.exe
+
+# Identity credentials and private keys (NEVER commit to GitHub)
+warp_identity*.json
+!warp_identity.example.json
+
+# Backups and temporary files
+*.bak
+*.tmp
+*.log
+
+# IDE and OS files
+.idea/
+.vscode/
+*.swp
+*.swo
+Thumbs.db
+Desktop.ini
+
+# Essential signed runtime dependencies
+!wintun.dll

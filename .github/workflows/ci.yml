@@ -1,0 +1,35 @@
+name: CI
+
+on:
+  push:
+    branches: [ master, main ]
+  pull_request:
+    branches: [ master, main ]
+
+jobs:
+  check-and-test:
+    name: Build & Test (Windows)
+    runs-on: windows-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - name: Enable Rust Cache
+        uses: Swatinem/rust-cache@v2
+
+      - name: Verify Formatting (cargo fmt)
+        run: cargo fmt --check
+
+      - name: Run Clippy Linter (cargo clippy)
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: Run Release Test Suite (cargo test)
+        run: cargo test --release
+
+      - name: Build Release Binary (cargo build)
+        run: cargo build --release

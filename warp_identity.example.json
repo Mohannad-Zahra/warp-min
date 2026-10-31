@@ -1,0 +1,11 @@
+{
+  "id": "00000000-0000-0000-0000-000000000000",
+  "token": "0000000000000000000000000000000000000000000=",
+  "private_key": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+  "public_key": "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB=",
+  "peer_public_key": "bmXOC+F1FxEMF9dyiK2H5/1SUtzH0JuVo51h2wPfgyo=",
+  "peer_endpoint": "162.159.192.1:2408",
+  "local_ipv4": "172.16.0.2",
+  "local_ipv6": "2606:4700:110:8xxx:xxxx:xxxx:xxxx:xxxx",
+  "reserved": [88, 120, 121]
+}
