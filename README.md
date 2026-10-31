@@ -337,26 +337,3 @@ netsh wlan set autoconfig enabled=yes interface="Wi-Fi"
 ### Licensing (Dual-License Model: MIT OR Apache-2.0)
 
 This project is licensed under the standard Rust ecosystem dual-license structure: you may choose either the [MIT License](LICENSE-MIT) or the [Apache License 2.0](LICENSE-APACHE) at your option.
-
-- **Why two licenses?**  
-  In the Rust community (following the precedent set by the Rust language itself, Tokio, and standard crates), dual-licensing allows downstream developers and organizations to select whichever terms fit their legal requirements:
-  - **MIT:** Short, simple, and permissive with minimal constraints for individual developers and small projects.
-  - **Apache 2.0:** Includes explicit patent grants and intellectual property protections for corporate/enterprise environments.
-- **Can you use just one license?**  
-  Yes. Users and redistributors are free to treat this project solely under the terms of the **MIT License**.
-
-### Security Notice: Identity Files & Cryptographic Secrets
-
-WARP-MIN automatically registers client sessions with Cloudflare's Edge API on initial startup and generates credentials cached locally in:
-- `warp_identity_hop1.json` (Outer tunnel session)
-- `warp_identity_hop2.json` (Inner tunnel session)
-
-These files contain:
-1. **Curve25519 Private Keys:** The local cryptographic secret key used by WireGuard (via BoringTun) to compute Diffie-Hellman shared secrets and encrypt all outbound network packets.
-2. **Cloudflare Device Tokens:** Secret bearer authentication tokens issued by Cloudflare's registration API.
-
-> [!WARNING]
-> **Keep your identity files private.**  
-> If your `warp_identity_*.json` files are committed to a public Git repository or shared online, third parties can extract your tokens, duplicate your WireGuard session across multiple machines simultaneously (causing session reset collisions), or abuse Cloudflare's API under your identity.  
-> 
-> These files are strictly ignored by Git via `.gitignore`. A safe dummy template with placeholders is provided in `warp_identity.example.json`.
