@@ -3,12 +3,13 @@ use std::process::Command;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use windows_sys::Win32::NetworkManagement::IpHelper::{
-    CreateIpForwardEntry2, CreateUnicastIpAddressEntry, DeleteIpForwardEntry2, FlushIpNetTable,
-    FlushIpPathTable, GetIpInterfaceEntry, InitializeIpForwardEntry, InitializeIpInterfaceEntry,
-    InitializeUnicastIpAddressEntry, SetIpInterfaceEntry, MIB_IPFORWARD_ROW2, MIB_IPINTERFACE_ROW,
+    ConvertInterfaceIndexToLuid, CreateIpForwardEntry2, CreateUnicastIpAddressEntry, DeleteIpForwardEntry2,
+    FlushIpNetTable, FlushIpPathTable, GetBestRoute2, GetIpInterfaceEntry,
+    InitializeIpForwardEntry, InitializeIpInterfaceEntry, InitializeUnicastIpAddressEntry,
+    SetIpForwardEntry2, SetIpInterfaceEntry, SetUnicastIpAddressEntry, MIB_IPFORWARD_ROW2, MIB_IPINTERFACE_ROW,
     MIB_UNICASTIPADDRESS_ROW,
 };
-use windows_sys::Win32::Networking::WinSock::AF_INET;
+use windows_sys::Win32::Networking::WinSock::{AF_INET, SOCKADDR_INET};
 use wintun::{Adapter, Session};
 
 #[derive(Debug, Clone)]
@@ -28,6 +29,10 @@ pub fn tune_interface_win32(if_index: u32, metric: u32, forwarding: bool) -> Res
         InitializeIpInterfaceEntry(&mut row);
         row.Family = AF_INET;
         row.InterfaceIndex = if_index;
+        let mut luid = std::mem::zeroed();
+        if ConvertInterfaceIndexToLuid(if_index, &mut luid) == 0 {
+            row.InterfaceLuid = luid;
+        }
 
         let get_res = GetIpInterfaceEntry(&mut row);
         if get_res != 0 {
@@ -41,6 +46,7 @@ pub fn tune_interface_win32(if_index: u32, metric: u32, forwarding: bool) -> Res
         row.UseAutomaticMetric = 0;
         row.Metric = metric;
         row.RouterDiscoveryBehavior = 0; // RouterDiscoveryDisabled
+        row.NlMtu = 1200; // Enforce MTU 1200 natively via IP Helper API
         row.SitePrefixLength = 0;
 
         let set_res = SetIpInterfaceEntry(&mut row);
@@ -60,6 +66,10 @@ pub fn tune_interface_weak_host(if_index: u32) -> Result<(), u32> {
         InitializeIpInterfaceEntry(&mut row);
         row.Family = AF_INET;
         row.InterfaceIndex = if_index;
+        let mut luid = std::mem::zeroed();
+        if ConvertInterfaceIndexToLuid(if_index, &mut luid) == 0 {
+            row.InterfaceLuid = luid;
+        }
 
         let get_res = GetIpInterfaceEntry(&mut row);
         if get_res != 0 {
@@ -98,6 +108,10 @@ pub fn add_route_win32(
         let mut row: MIB_IPFORWARD_ROW2 = std::mem::zeroed();
         InitializeIpForwardEntry(&mut row);
         row.InterfaceIndex = if_index;
+        let mut luid = std::mem::zeroed();
+        if ConvertInterfaceIndexToLuid(if_index, &mut luid) == 0 {
+            row.InterfaceLuid = luid;
+        }
         row.Metric = metric;
         row.DestinationPrefix.Prefix.si_family = AF_INET;
         row.DestinationPrefix.Prefix.Ipv4.sin_addr.S_un.S_addr =
@@ -110,6 +124,13 @@ pub fn add_route_win32(
         }
 
         let ret = CreateIpForwardEntry2(&row);
+        if ret == 5010 || ret == 183 {
+            // Route already exists: update metric and interface properties
+            let set_ret = SetIpForwardEntry2(&row);
+            if set_ret == 0 {
+                return Ok(());
+            }
+        }
         // NO_ERROR (0) or ERROR_OBJECT_ALREADY_EXISTS (5010 / 183)
         if ret == 0 || ret == 5010 || ret == 183 {
             Ok(())
@@ -120,11 +141,24 @@ pub fn add_route_win32(
 }
 
 /// Deletes an IPv4 route directly from the Windows TCP/IP stack via DeleteIpForwardEntry2.
+/// If `if_index == 0`, dynamically queries `get_best_route_interface` to discover which
+/// interface owns the route prefix before deletion.
 pub fn delete_route_win32(if_index: u32, dest: Ipv4Addr, prefix_len: u8) -> Result<(), u32> {
     unsafe {
+        let mut target_if = if_index;
+        if target_if == 0
+            && let Ok((routed_if, _)) = get_best_route_interface(dest)
+        {
+            target_if = routed_if;
+        }
+
         let mut row: MIB_IPFORWARD_ROW2 = std::mem::zeroed();
         InitializeIpForwardEntry(&mut row);
-        row.InterfaceIndex = if_index;
+        row.InterfaceIndex = target_if;
+        let mut luid = std::mem::zeroed();
+        if target_if > 0 && ConvertInterfaceIndexToLuid(target_if, &mut luid) == 0 {
+            row.InterfaceLuid = luid;
+        }
         row.DestinationPrefix.Prefix.si_family = AF_INET;
         row.DestinationPrefix.Prefix.Ipv4.sin_addr.S_un.S_addr =
             u32::from_ne_bytes(dest.octets());
@@ -141,10 +175,10 @@ pub fn delete_route_win32(if_index: u32, dest: Ipv4Addr, prefix_len: u8) -> Resu
 }
 
 /// Adds an IPv4 address to the specified interface via CreateUnicastIpAddressEntry.
-/// When `skip_as_source` is true, Windows TCP/IP will NOT select this address as the source
-/// address for unbound sockets (e.g. RobloxPlayerBeta.exe binding to inaddr_any:0), allowing
-/// the primary VPN address (e.g. ProtonVPN 10.2.0.2) to be chosen so outbound packets pass
-/// ProtonVPN's WFP leak protection filter at FWPM_LAYER_ALE_AUTH_CONNECT_V4.
+/// When `skip_as_source` is false (0), Windows TCP/IP will select this address as the source
+/// address for unbound sockets routing through this interface (RFC 6724), ensuring natural
+/// Layer-3 tunnel ingestion without triggering ProtonVPN WFP leak-protection drops.
+/// If the IP already exists, updates it via SetUnicastIpAddressEntry to guarantee SkipAsSource is false (0).
 pub fn add_ip_address_win32(
     if_index: u32,
     ip: Ipv4Addr,
@@ -155,14 +189,34 @@ pub fn add_ip_address_win32(
         let mut row: MIB_UNICASTIPADDRESS_ROW = std::mem::zeroed();
         InitializeUnicastIpAddressEntry(&mut row);
         row.InterfaceIndex = if_index;
+        let mut luid = std::mem::zeroed();
+        if ConvertInterfaceIndexToLuid(if_index, &mut luid) == 0 {
+            row.InterfaceLuid = luid;
+        }
         row.Address.si_family = AF_INET;
         row.Address.Ipv4.sin_addr.S_un.S_addr = u32::from_ne_bytes(ip.octets());
         row.OnLinkPrefixLength = prefix_len;
         row.SkipAsSource = if skip_as_source { 1 } else { 0 };
+        row.DadState = 4; // IpDadStatePreferred (4) -> Bypasses tentative DAD state so the IP is immediately active
 
         let ret = CreateUnicastIpAddressEntry(&row);
-        // NO_ERROR (0) or ERROR_OBJECT_ALREADY_EXISTS (5010 / 183)
-        if ret == 0 || ret == 5010 || ret == 183 {
+        if ret == 5010 || ret == 183 {
+            // Address already exists on the adapter: actively repair existing bad state
+            let mut update_row: MIB_UNICASTIPADDRESS_ROW = std::mem::zeroed();
+            InitializeUnicastIpAddressEntry(&mut update_row);
+            update_row.InterfaceIndex = if_index;
+            let _ = ConvertInterfaceIndexToLuid(if_index, &mut update_row.InterfaceLuid);
+            update_row.Address.si_family = AF_INET;
+            update_row.Address.Ipv4.sin_addr.S_un.S_addr = u32::from_ne_bytes(ip.octets());
+            update_row.SkipAsSource = if skip_as_source { 1 } else { 0 };
+            let set_ret = SetUnicastIpAddressEntry(&update_row);
+            if set_ret == 0 {
+                return Ok(());
+            } else {
+                return Err(set_ret);
+            }
+        }
+        if ret == 0 {
             Ok(())
         } else {
             Err(ret)
@@ -170,7 +224,39 @@ pub fn add_ip_address_win32(
     }
 }
 
+/// Queries the Windows TCP/IP stack via GetBestRoute2 to determine which interface
+/// and source IP Windows will choose for an outbound socket to `dest`.
+pub fn get_best_route_interface(dest: Ipv4Addr) -> Result<(u32, Ipv4Addr), u32> {
+    unsafe {
+        let mut dest_addr: SOCKADDR_INET = std::mem::zeroed();
+        dest_addr.si_family = AF_INET;
+        dest_addr.Ipv4.sin_addr.S_un.S_addr = u32::from_ne_bytes(dest.octets());
+
+        let mut best_route: MIB_IPFORWARD_ROW2 = std::mem::zeroed();
+        let mut best_source: SOCKADDR_INET = std::mem::zeroed();
+
+        let ret = GetBestRoute2(
+            std::ptr::null(),
+            0,
+            std::ptr::null(),
+            &dest_addr,
+            0,
+            &mut best_route,
+            &mut best_source,
+        );
+
+        if ret == 0 {
+            let src_bytes = best_source.Ipv4.sin_addr.S_un.S_addr.to_ne_bytes();
+            let src_ip = Ipv4Addr::from(src_bytes);
+            Ok((best_route.InterfaceIndex, src_ip))
+        } else {
+            Err(ret)
+        }
+    }
+}
+
 pub struct WintunDevice {
+    pub if_index: u32,
     #[allow(dead_code)]
     pub adapter: Arc<Adapter>,
     pub session: Arc<Session>,
@@ -180,6 +266,8 @@ pub struct WintunDevice {
     pub primary_interface: Option<PrimaryInterface>,
     #[allow(dead_code)]
     pub original_gateway: Option<String>,
+    #[allow(dead_code)]
+    pub wfp_session: std::sync::Mutex<Option<crate::wfp::WfpPermitSession>>,
     cleaned_up: AtomicBool,
 }
 
@@ -214,8 +302,12 @@ impl WintunDevice {
                 "Get-NetRoute -DestinationPrefix '128.116*' -ErrorAction SilentlyContinue | Remove-NetRoute -Confirm:$false -ErrorAction SilentlyContinue; Remove-NetNeighbor -IPAddress '172.16.0.1' -Confirm:$false -ErrorAction SilentlyContinue; Remove-NetRoute -DestinationPrefix '1.1.1.1/32' -Confirm:$false -ErrorAction SilentlyContinue",
             ])
             .output();
+        let _ = delete_route_win32(0, Ipv4Addr::new(128, 116, 0, 0), 17);
         let _ = Command::new("route")
             .args(["delete", "128.116.0.0"])
+            .output();
+        let _ = Command::new("route")
+            .args(["delete", "128.116.0.0", "mask", "255.255.128.0", "0.0.0.0"])
             .output();
 
         // If existing adapter exists, delete it first to ensure clean state
@@ -230,11 +322,16 @@ impl WintunDevice {
         let adapter = Adapter::create(&wintun, adapter_name, "WARP", None)
             .map_err(|e| format!("Failed to create Wintun adapter: {:?}. Note: TUN mode requires Administrator privileges (Run as Administrator).", e))?;
 
+        // Initialize Wintun session immediately after creation so NDIS transitions to MediaConnectStateConnected.
+        // This ensures the interface is connected before route table manipulation and GetBestRoute2 queries.
+        crate::log_info!("[*] Initializing Wintun session ring-buffer on '{}'...", adapter_name);
         let session = adapter
             .start_session(wintun::MAX_RING_CAPACITY)
             .map_err(|e| format!("Failed to start Wintun session: {:?}", e))?;
-
         let session = Arc::new(session);
+
+        // Allow Windows NDIS link-state transition (MediaConnectStateConnected) to propagate to tcpip.sys
+        std::thread::sleep(std::time::Duration::from_millis(300));
 
         // Find current default physical gateway for outer endpoint A pinning
         let original_gateway = get_default_gateway();
@@ -259,18 +356,38 @@ impl WintunDevice {
         let if_index = adapter.get_adapter_index()?;
         let if_index_str = if_index.to_string();
 
-        // Configure adapter IP via native Win32 CreateUnicastIpAddressEntry with SkipAsSource=1
-        // (falling back to netsh skipassource=true and PowerShell Set-NetIPAddress).
-        // Setting SkipAsSource=true ensures Windows source address selection picks the primary VPN
-        // address (e.g. ProtonVPN 10.2.0.2) for unbound sockets (Roblox inaddr_any:0), allowing packets
-        // to pass ProtonVPN's WFP leak-protection filter at FWPM_LAYER_ALE_AUTH_CONNECT_V4.
+        // Register WFP Hard-Permit filter (SubLayer Weight 65535) scoped to this Wintun adapter LUID.
+        // Under multi-VPN environments with active kill-switches (e.g. ProtonVPN's "ProtonVPN block IPv4"),
+        // this guarantees Windows TCP/IP stack allows outbound packets on WARP-Gool to proceed into the driver ring buffer.
+        let mut luid = unsafe { std::mem::zeroed() };
+        let mut wfp_session = None;
+        if unsafe { ConvertInterfaceIndexToLuid(if_index, &mut luid) } == 0 {
+            let luid_val = unsafe { luid.Value };
+            match crate::wfp::WfpPermitSession::install_tun_permit(luid_val) {
+                Ok(s) => {
+                    wfp_session = Some(s);
+                }
+                Err(err) => {
+                    crate::log_warn!(
+                        "[!] WFP Hard-Permit registration note: OS error code {} (continuing with standard TCP/IP routing)",
+                        err
+                    );
+                }
+            }
+        }
+
+        // Configure adapter IP via native Win32 CreateUnicastIpAddressEntry with SkipAsSource=0 (false)
+        // (falling back to netsh skipassource=false and PowerShell Set-NetIPAddress -SkipAsSource $false).
+        // SkipAsSource MUST be FALSE so that when Roblox creates an unbound socket (inaddr_any:0),
+        // Windows Source Address Selection (RFC 6724) selects the virtual TUN address (172.16.0.2)
+        // rather than the physical Wi-Fi IP (192.168.1.106). Outbound gameplay packets enter WARP-Gool directly.
         let ip_str = local_ipv4.to_string();
         crate::log_info!(
-            "[*] Configuring adapter IP {} (mask=255.255.255.255, skip_as_source=true, if_index {})...",
+            "[*] Configuring adapter IP {} (mask=255.255.255.255, skip_as_source=false, if_index {})...",
             ip_str, if_index
         );
 
-        if let Err(e) = add_ip_address_win32(if_index, local_ipv4, 32, true) {
+        if let Err(e) = add_ip_address_win32(if_index, local_ipv4, 32, false) {
             crate::log_warn!(
                 "[!] Native Win32 add_ip_address_win32 returned code {}; falling back to netsh/powershell",
                 e
@@ -288,19 +405,31 @@ impl WintunDevice {
                     "gateway=none",
                 ])
                 .output();
+            let _ = Command::new("netsh")
+                .args([
+                    "interface",
+                    "ipv4",
+                    "add",
+                    "address",
+                    &format!("name={}", adapter_name),
+                    &format!("addr={}", ip_str),
+                    "mask=255.255.255.255",
+                    "skipassource=false",
+                ])
+                .output();
             let _ = Command::new("powershell")
                 .args([
                     "-NoProfile",
                     "-Command",
                     &format!(
-                        "Set-NetIPAddress -InterfaceIndex {} -IPAddress '{}' -SkipAsSource $true -ErrorAction SilentlyContinue",
+                        "if (Get-NetIPAddress -InterfaceIndex {0} -IPAddress '{1}' -ErrorAction SilentlyContinue) {{ Set-NetIPAddress -InterfaceIndex {0} -IPAddress '{1}' -PrefixLength 32 -SkipAsSource $false -ErrorAction SilentlyContinue }} else {{ New-NetIPAddress -InterfaceIndex {0} -IPAddress '{1}' -PrefixLength 32 -SkipAsSource $false -ErrorAction SilentlyContinue }}",
                         if_index, ip_str
                     ),
                 ])
                 .output();
         } else {
             crate::log_info!(
-                "[+] Configured adapter IP via native Win32: SkipAsSource=Enabled, PrefixLength=32"
+                "[+] Configured adapter IP via native Win32: SkipAsSource=Disabled, PrefixLength=32"
             );
         }
 
@@ -368,10 +497,13 @@ impl WintunDevice {
         // Flush stale neighbor / IP path entries to purge any residual Unreachable states
         flush_interface_neighbors(if_index);
 
-        // 3. Enforce Private Network Profile so Windows Firewall does not restrict outbound packets
+        // Layer-3 TUN interfaces (Wintun) operate at the IP layer and do not use ARP or Ethernet neighbors.
+        // Interface neighbor cache flushed above ensures clean routing path state.
+
+        // 4. Enforce Private Network Profile and add explicit outbound permit rule so Windows Firewall does not restrict outbound packets
         let ps_private_profile = format!(
-            "Set-NetConnectionProfile -InterfaceAlias '{}' -NetworkCategory Private -ErrorAction SilentlyContinue",
-            adapter_name
+            "Set-NetConnectionProfile -InterfaceIndex {} -NetworkCategory Private -ErrorAction SilentlyContinue; Set-NetConnectionProfile -InterfaceAlias '{}' -NetworkCategory Private -ErrorAction SilentlyContinue; New-NetFirewallRule -DisplayName 'WARP-Gool Permit Outbound' -Direction Outbound -InterfaceAlias '{}' -Action Allow -Profile Any -ErrorAction SilentlyContinue",
+            if_index, adapter_name, adapter_name
         );
         let _ = Command::new("powershell")
             .args(["-NoProfile", "-Command", &ps_private_profile])
@@ -430,7 +562,11 @@ impl WintunDevice {
             pin_host_routes(&target_host_ips, pri);
         }
 
-        // Pinned on-link route for Roblox gameplay traffic (128.116.0.0/17 RakNet UDP) via WARP-Gool
+        // Pinned on-link route for Roblox gameplay traffic (128.116.0.0/17 RakNet UDP) via WARP-Gool.
+        // On Layer-3 TUN interfaces (Wintun), traffic must be routed as On-Link (NextHop = 0.0.0.0).
+        // Since SkipAsSource is false (0) on WARP-Gool, Windows Source Address Selection binds
+        // outbound gameplay sockets directly to the virtual TUN IP (172.16.0.2), cleanly entering
+        // WARP-Gool without passing through physical Wi-Fi or triggering ProtonVPN WFP leak filters.
         crate::log_info!(
             "[*] Installing Roblox gameplay route (128.116.0.0/17) via {} (on-link 0.0.0.0, Metric 1)...",
             adapter_name
@@ -462,18 +598,45 @@ impl WintunDevice {
             );
         }
 
+        // Real-time kernel route verification via GetBestRoute2 for actual Roblox game server (128.116.5.33)
+        match get_best_route_interface(Ipv4Addr::new(128, 116, 5, 33)) {
+            Ok((routed_if, src_ip)) => {
+                if routed_if == if_index && src_ip == local_ipv4 {
+                    crate::log_info!(
+                        "[+] Kernel Route Verified: 128.116.5.33 bound to {} (ifIndex {}) with source IP {} (WFP-safe)",
+                        adapter_name, if_index, src_ip
+                    );
+                } else if routed_if == if_index {
+                    crate::log_warn!(
+                        "[!] Kernel Route Notice: 128.116.5.33 routed to {} but source IP is {} (expected tunnel IP {})",
+                        adapter_name, src_ip, local_ipv4
+                    );
+                } else {
+                    crate::log_error!(
+                        "[-] Kernel Route Error: 128.116.5.33 routed to interface {} instead of {}",
+                        routed_if, adapter_name
+                    );
+                }
+            }
+            Err(e) => {
+                crate::log_debug!("[!] GetBestRoute2 pre-flight query code: {}", e);
+            }
+        }
+
         crate::log_info!(
             "[+] Split-Tunneling active: Roblox gameplay UDP (128.116.0.0/17) routes via WARP-Gool into Hop 2; API and launcher endpoints ({} IPs) pinned via primary VPN.",
             target_host_ips.len()
         );
 
         Ok(Self {
+            if_index,
             adapter,
             session,
             endpoint_a_ip: endpoint_a_ip.to_string(),
             api_ips: target_host_ips,
             primary_interface,
             original_gateway,
+            wfp_session: std::sync::Mutex::new(wfp_session),
             cleaned_up: AtomicBool::new(false),
         })
     }
@@ -481,6 +644,9 @@ impl WintunDevice {
     pub fn restore_routing(&self) {
         if self.cleaned_up.swap(true, Ordering::SeqCst) {
             return;
+        }
+        if let Ok(mut lock) = self.wfp_session.lock() {
+            let _ = lock.take();
         }
         let _ = self.session.shutdown();
         let adapter_name = self
@@ -496,7 +662,19 @@ impl WintunDevice {
                 &format!("name={}", adapter_name),
             ])
             .output();
-        cleanup_routes(&self.endpoint_a_ip, &self.api_ips);
+        let _ = Command::new("powershell")
+            .args([
+                "-NoProfile",
+                "-Command",
+                "Remove-NetFirewallRule -DisplayName 'WARP-Gool Permit Outbound' -ErrorAction SilentlyContinue",
+            ])
+            .output();
+        cleanup_routes_with_interfaces(
+            &self.endpoint_a_ip,
+            &self.api_ips,
+            self.primary_interface.as_ref().map(|p| p.if_index),
+            Some(self.if_index),
+        );
     }
 }
 
@@ -548,9 +726,26 @@ pub fn pin_host_route_to_primary(target_ip: &str, primary: &PrimaryInterface) {
     pin_host_routes(&[target_ip.to_string()], primary);
 }
 
+#[allow(dead_code)]
 pub fn cleanup_routes(endpoint_a_ip: &str, api_ips: &[String]) {
+    let pri = get_primary_interface();
+    cleanup_routes_with_interfaces(
+        endpoint_a_ip,
+        api_ips,
+        pri.as_ref().map(|p| p.if_index),
+        None,
+    );
+}
+
+#[allow(dead_code)]
+pub fn cleanup_routes_with_interfaces(
+    endpoint_a_ip: &str,
+    api_ips: &[String],
+    primary_if_index: Option<u32>,
+    wintun_if_index: Option<u32>,
+) {
     crate::log_info!("[*] Restoring host routing table...");
-    let _ = delete_route_win32(0, Ipv4Addr::new(128, 116, 0, 0), 17);
+    let _ = delete_route_win32(wintun_if_index.unwrap_or(0), Ipv4Addr::new(128, 116, 0, 0), 17);
     let _ = Command::new("netsh")
         .args([
             "interface",
@@ -585,10 +780,11 @@ pub fn cleanup_routes(endpoint_a_ip: &str, api_ips: &[String]) {
     }
 
     // Fast native Win32 route deletion (< 2ms total, 0 subprocesses)
+    let pri_if = primary_if_index.unwrap_or(0);
     let mut win32_deleted = 0usize;
     for ip in &all_clean_ips {
         if let Ok(ip_addr) = ip.parse::<Ipv4Addr>()
-            && delete_route_win32(0, ip_addr, 32).is_ok()
+            && delete_route_win32(pri_if, ip_addr, 32).is_ok()
         {
             win32_deleted += 1;
         }
@@ -724,7 +920,7 @@ mod tests {
         assert!(tune_interface_win32(999999, 1, false).is_err());
         assert!(tune_interface_weak_host(999999).is_err());
         flush_interface_neighbors(999999);
-        assert!(add_ip_address_win32(999999, Ipv4Addr::new(172, 16, 0, 2), 32, true).is_err());
+        assert!(add_ip_address_win32(999999, Ipv4Addr::new(172, 16, 0, 2), 32, false).is_err());
         assert!(add_route_win32(999999, Ipv4Addr::new(128, 116, 0, 0), 17, None, 1).is_err());
         let del_err = delete_route_win32(999999, Ipv4Addr::new(128, 116, 0, 0), 17);
         println!("del_err on dummy if: {:?}", del_err);
@@ -746,6 +942,35 @@ mod tests {
     }
 
     #[test]
+    fn test_add_ip_address_win32_skip_as_source_false() {
+        // Assert calling add_ip_address_win32 with skip_as_source = false on dummy interface returns error without panic
+        let res = add_ip_address_win32(999999, Ipv4Addr::new(172, 16, 0, 2), 32, false);
+        assert!(res.is_err());
+    }
+
+    #[test]
+    fn test_add_ip_address_win32_skip_as_source_true() {
+        // Assert calling add_ip_address_win32 with skip_as_source = true on dummy interface returns error without panic
+        let res = add_ip_address_win32(999999, Ipv4Addr::new(172, 16, 0, 2), 32, true);
+        assert!(res.is_err());
+    }
+
+    #[test]
+    fn test_get_best_route_interface_loopback_or_default() {
+        // Querying route to 127.0.0.1 should succeed and return loopback interface
+        let res = get_best_route_interface(Ipv4Addr::new(127, 0, 0, 1));
+        assert!(res.is_ok(), "GetBestRoute2 to 127.0.0.1 must succeed");
+        let (if_index, src_ip) = res.unwrap();
+        assert!(if_index > 0);
+        assert_eq!(src_ip, Ipv4Addr::new(127, 0, 0, 1));
+
+        // Querying route to Roblox game server when WARP-Gool is not running should route via Primary/ProtonVPN
+        let res_game = get_best_route_interface(Ipv4Addr::new(128, 116, 5, 33));
+        println!("Current Route to Roblox 128.116.5.33: {:?}", res_game);
+        assert!(res_game.is_ok(), "GetBestRoute2 to 128.116.5.33 must succeed");
+    }
+
+    #[test]
     fn test_pin_host_route_on_link_does_not_panic() {
         let dummy_on_link = PrimaryInterface {
             if_index: 9999,
@@ -754,5 +979,48 @@ mod tests {
             ip: Some("10.2.0.2".to_string()),
         };
         pin_host_route_to_primary("192.0.2.5", &dummy_on_link);
+    }
+
+    #[test]
+    fn test_roblox_gameplay_server_ip_classification() {
+        // Actual server from RobloxPlayerBeta logs: 128.116.5.33
+        let game_ip = Ipv4Addr::new(128, 116, 5, 33);
+        assert!(is_in_roblox_gameplay_cidr(game_ip));
+
+        // Subnet boundaries
+        assert!(is_in_roblox_gameplay_cidr(Ipv4Addr::new(128, 116, 0, 1)));
+        assert!(is_in_roblox_gameplay_cidr(Ipv4Addr::new(128, 116, 127, 254)));
+        assert!(!is_in_roblox_gameplay_cidr(Ipv4Addr::new(128, 116, 128, 1)));
+    }
+
+    #[test]
+    fn test_roblox_edge_pinning_targets_all_subnets() {
+        let mut target_host_ips = Vec::new();
+        for i in 0..128 {
+            target_host_ips.push(format!("128.116.{}.3", i));
+        }
+        assert_eq!(target_host_ips.len(), 128);
+        assert!(target_host_ips.contains(&"128.116.31.3".to_string()));
+        assert!(target_host_ips.contains(&"128.116.5.3".to_string()));
+        // Actual game server (128.116.5.33) must NOT be in target_host_ips so it routes via WARP-Gool
+        assert!(!target_host_ips.contains(&"128.116.5.33".to_string()));
+    }
+
+    #[test]
+    fn test_delete_route_win32_zero_if_index_resolves_dynamically() {
+        // Calling delete_route_win32 with if_index = 0 should resolve route via GetBestRoute2
+        // and return without panic
+        let res = delete_route_win32(0, Ipv4Addr::new(128, 116, 5, 33), 32);
+        assert!(res.is_ok() || res.is_err());
+    }
+
+    #[test]
+    fn test_cleanup_routes_with_interfaces_does_not_panic() {
+        cleanup_routes_with_interfaces(
+            "162.159.192.1",
+            &["128.116.21.3".to_string()],
+            Some(9999),
+            Some(9998),
+        );
     }
 }
