@@ -93,6 +93,7 @@ WARP-MIN solves this through four core innovations:
 
 - **Pure Rust Implementation:** Zero C/C++ runtime dependencies, built on Tokio, BoringTun (Cloudflare's Noise protocol implementation), and Wintun.
 - **Wintun Kernel Layer-3 Driver:** Operates directly on the high-speed Wintun TUN driver with 8 MB zero-copy circular ring buffers and 4 MB OS UDP socket buffers.
+- **Windows Filtering Platform (WFP) Hard-Permit Subsystem:** Installs a maximum-priority (weight 65535) dynamic WFP sublayer and Hard-Permit filters (`FWPM_FILTER_FLAG_CLEAR_ACTION_RIGHT`) scoped to the Wintun adapter LUID. Guarantees seamless coexistence when commercial VPNs (e.g. ProtonVPN) have strict kill-switches enabled, preventing kernel packet drops at `ALE_AUTH_CONNECT_V4` (eliminating Roblox Error 279).
 - **TCP MSS Clamping (RFC 1624):** Automatically clamps TCP MSS to 1120 bytes on `SYN`/`SYN-ACK` packets with incremental 16-bit 1's complement checksum updates to prevent Path MTU black holes.
 - **Dynamic Anycast Probing:** Probes 52 candidate Cloudflare Anycast endpoints in parallel at startup, locking into the lowest-latency responsive edge server.
 - **Intra-PoP Complementary Pool Alignment:** Automatically alternates Hop 2 across complementary IP subnets (`162.159.192.0/24` $\leftrightarrow$ `188.114.97.0/24`) to eliminate Cloudflare's internal self-traffic drop bug.
