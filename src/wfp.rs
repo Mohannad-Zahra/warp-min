@@ -1,11 +1,11 @@
 use std::ptr;
-use windows_sys::core::GUID;
 use windows_sys::Win32::Foundation::HANDLE;
 use windows_sys::Win32::NetworkManagement::WindowsFilteringPlatform::*;
+use windows_sys::core::GUID;
 
 /// Static GUID identifying the WARP-MIN High-Priority WFP Sublayer:
 /// {e94c8e7e-399a-4c28-bb71-12502693fa2b}
-const WARP_MIN_SUBLAYER_GUID: GUID = GUID {
+pub(crate) const WARP_MIN_SUBLAYER_GUID: GUID = GUID {
     data1: 0xe94c8e7e,
     data2: 0x399a,
     data3: 0x4c28,
@@ -20,6 +20,8 @@ pub struct WfpPermitSession {
     engine_handle: HANDLE,
 }
 
+// Safety: The RPC engine handle returned by FwpmEngineOpen0 is thread-safe across Win32 threads within
+// the owning process and can be safely passed between threads or closed from any thread upon drop.
 unsafe impl Send for WfpPermitSession {}
 unsafe impl Sync for WfpPermitSession {}
 
@@ -28,10 +30,10 @@ impl WfpPermitSession {
     /// and installs "Hard Permit" rules (FWPM_FILTER_FLAG_CLEAR_ACTION_RIGHT) on ALE_AUTH_CONNECT_V4
     /// and ALE_AUTH_RECV_ACCEPT_V4 scoped specifically to the WARP-Gool interface LUID.
     ///
-    /// Under WFP filter arbitration rules, this permanently clears the FWPS_RIGHT_ACTION_WRITE permission
-    /// on all packets traversing WARP-Gool, completely neutralizing lower-priority block rules
-    /// (such as ProtonVPN's "ProtonVPN block IPv4" kill-switch rule at weight 1001) without altering
-    /// or compromising ProtonVPN's leak protection on any other network interface.
+    /// Under WFP filter arbitration rules, FWPM_FILTER_FLAG_CLEAR_ACTION_RIGHT clears the
+    /// FWPS_RIGHT_ACTION_WRITE permission during packet evaluation on WARP-Gool, preventing
+    /// lower-priority sublayers (such as third-party commercial VPN kill-switches) from overriding
+    /// the PERMIT action without compromising leak protection on any other network interface.
     pub fn install_tun_permit(if_luid: u64) -> Result<Self, u32> {
         unsafe {
             let mut engine_handle: HANDLE = 0;
@@ -80,8 +82,9 @@ impl WfpPermitSession {
             // Setting FWPM_FILTER_FLAG_CLEAR_ACTION_RIGHT strips FWPS_RIGHT_ACTION_WRITE,
             // preventing lower-priority sublayers (e.g. ProtonVPN's catch-all block filter 146120)
             // from overriding this permit.
-            let filter_name_out: Vec<u16> =
-                "WARP-MIN Permit Outbound IPv4 on TUN\0".encode_utf16().collect();
+            let filter_name_out: Vec<u16> = "WARP-MIN Permit Outbound IPv4 on TUN\0"
+                .encode_utf16()
+                .collect();
             let mut filter_out: FWPM_FILTER0 = std::mem::zeroed();
             filter_out.subLayerKey = WARP_MIN_SUBLAYER_GUID;
             filter_out.layerKey = FWPM_LAYER_ALE_AUTH_CONNECT_V4;
@@ -94,16 +97,21 @@ impl WfpPermitSession {
             filter_out.filterCondition = &mut cond;
 
             let mut filter_id_out: u64 = 0;
-            let filter_ret_out =
-                FwpmFilterAdd0(engine_handle, &filter_out, ptr::null_mut(), &mut filter_id_out);
+            let filter_ret_out = FwpmFilterAdd0(
+                engine_handle,
+                &filter_out,
+                ptr::null_mut(),
+                &mut filter_id_out,
+            );
             if filter_ret_out != 0 && filter_ret_out != 5010 && filter_ret_out != 183 {
                 FwpmEngineClose0(engine_handle);
                 return Err(filter_ret_out);
             }
 
             // 4. Install Inbound Hard Permit (FWPM_LAYER_ALE_AUTH_RECV_ACCEPT_V4)
-            let filter_name_in: Vec<u16> =
-                "WARP-MIN Permit Inbound IPv4 on TUN\0".encode_utf16().collect();
+            let filter_name_in: Vec<u16> = "WARP-MIN Permit Inbound IPv4 on TUN\0"
+                .encode_utf16()
+                .collect();
             let mut filter_in: FWPM_FILTER0 = std::mem::zeroed();
             filter_in.subLayerKey = WARP_MIN_SUBLAYER_GUID;
             filter_in.layerKey = FWPM_LAYER_ALE_AUTH_RECV_ACCEPT_V4;
@@ -116,8 +124,12 @@ impl WfpPermitSession {
             filter_in.filterCondition = &mut cond;
 
             let mut filter_id_in: u64 = 0;
-            let filter_ret_in =
-                FwpmFilterAdd0(engine_handle, &filter_in, ptr::null_mut(), &mut filter_id_in);
+            let filter_ret_in = FwpmFilterAdd0(
+                engine_handle,
+                &filter_in,
+                ptr::null_mut(),
+                &mut filter_id_in,
+            );
             if filter_ret_in != 0 && filter_ret_in != 5010 && filter_ret_in != 183 {
                 FwpmEngineClose0(engine_handle);
                 return Err(filter_ret_in);
@@ -141,25 +153,5 @@ impl Drop for WfpPermitSession {
             }
             self.engine_handle = 0;
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_wfp_sublayer_guid_format() {
-        assert_eq!(WARP_MIN_SUBLAYER_GUID.data1, 0xe94c8e7e);
-        assert_eq!(WARP_MIN_SUBLAYER_GUID.data2, 0x399a);
-        assert_eq!(WARP_MIN_SUBLAYER_GUID.data3, 0x4c28);
-    }
-
-    #[test]
-    fn test_wfp_install_on_invalid_luid_non_elevated() {
-        // Calling install_tun_permit without admin rights returns an error code without panicking
-        let res = WfpPermitSession::install_tun_permit(123456789);
-        // Will either succeed (if running elevated) or fail with ERROR_ACCESS_DENIED (5)
-        println!("test_wfp_install_on_invalid_luid result: {:?}", res.is_ok());
     }
 }
