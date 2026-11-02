@@ -23,6 +23,7 @@ pub struct DualHopTunnel {
     pub hop2_reserved: [u8; 3],
     pub is_single: bool,
     pub snat_map: std::collections::HashMap<u16, Ipv4Addr>,
+    pub snat_order: std::collections::VecDeque<u16>,
 }
 
 impl DualHopTunnel {
@@ -75,6 +76,7 @@ impl DualHopTunnel {
             hop2_reserved: account2.reserved,
             is_single: false,
             snat_map: std::collections::HashMap::new(),
+            snat_order: std::collections::VecDeque::new(),
         })
     }
 
@@ -145,7 +147,11 @@ impl DualHopTunnel {
         // Stateless SNAT: If an outbound UDP packet has a source IP other than tunnel IP
         // (e.g. 10.2.0.2 from ProtonVPN), rewrite source IP to target_ip so Cloudflare WireGuard
         // cryptokey routing accepts and forwards it without drops.
-        let target_ip = if self.is_single { self.hop1_ip } else { self.hop2_ip };
+        let target_ip = if self.is_single {
+            self.hop1_ip
+        } else {
+            self.hop2_ip
+        };
         if user_packet.len() >= 28 && user_packet[9] == 17 {
             let ihl = (user_packet[0] & 0x0f) as usize * 4;
             if user_packet.len() >= ihl + 8 {
@@ -157,8 +163,13 @@ impl DualHopTunnel {
                 );
                 let src_port = u16::from_be_bytes([user_packet[ihl], user_packet[ihl + 1]]);
                 if src_ip != target_ip {
-                    if self.snat_map.len() > 1024 {
-                        self.snat_map.clear();
+                    if !self.snat_map.contains_key(&src_port) {
+                        if self.snat_map.len() >= 2048
+                            && let Some(oldest_port) = self.snat_order.pop_front()
+                        {
+                            self.snat_map.remove(&oldest_port);
+                        }
+                        self.snat_order.push_back(src_port);
                     }
                     self.snat_map.insert(src_port, src_ip);
                     translate_ipv4_udp_src(user_packet, src_ip, target_ip);
@@ -229,11 +240,14 @@ impl DualHopTunnel {
                         clamp_tcp_mss(&mut pkt, 1120);
                         self.apply_inbound_snat(&mut pkt);
                         outcome.to_user.push(pkt);
-                    } else if let Some(inner_wg_pkt) = extract_inner_hop2_payload(ip_pkt, &self.endpoint_b) {
+                    } else if let Some(inner_wg_pkt) =
+                        extract_inner_hop2_payload(ip_pkt, &self.endpoint_b)
+                    {
                         let mut inner_copy = inner_wg_pkt.to_vec();
                         clear_reserved_inbound(&mut inner_copy);
 
-                        let mut hop2_action = self.hop2_tunn.decapsulate(None, &inner_copy, inner_buf);
+                        let mut hop2_action =
+                            self.hop2_tunn.decapsulate(None, &inner_copy, inner_buf);
                         loop {
                             match hop2_action {
                                 TunnResult::WriteToNetwork(hop2_resp) => {
@@ -288,8 +302,12 @@ impl DualHopTunnel {
         outcome
     }
 
-    fn apply_inbound_snat(&self, pkt: &mut [u8]) {
-        let target_ip = if self.is_single { self.hop1_ip } else { self.hop2_ip };
+    pub(crate) fn apply_inbound_snat(&self, pkt: &mut [u8]) {
+        let target_ip = if self.is_single {
+            self.hop1_ip
+        } else {
+            self.hop2_ip
+        };
         if pkt.len() >= 28 && pkt[9] == 17 {
             let ihl = (pkt[0] & 0x0f) as usize * 4;
             if pkt.len() >= ihl + 8 {
@@ -760,457 +778,4 @@ pub fn is_roblox_voice_traffic(pkt: &[u8], voice_ips: &[Ipv4Addr]) -> bool {
     let dst_port = u16::from_be_bytes([pkt[ihl + 2], pkt[ihl + 3]]);
     (dst_ip.octets()[0] == 128 && dst_ip.octets()[1] == 116 && (dst_ip.octets()[2] & 0x80) == 0)
         && (dst_port == 3478 || dst_port == 5349)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use smoltcp::wire::{Ipv4Address, Ipv4Packet, TcpControl, TcpPacket, TcpRepr, UdpPacket};
-
-    #[test]
-    fn test_build_ipv4_udp_packet_validity() {
-        let src = Ipv4Addr::new(172, 16, 0, 2);
-        let dst = Ipv4Addr::new(162, 159, 192, 1);
-        let payload = b"hello wireguard handshake test payload";
-        let pkt = build_ipv4_udp_packet(src, dst, 51820, 2408, payload);
-
-        // Verify with smoltcp
-        let ip_pkt = Ipv4Packet::new_checked(&pkt).expect("Valid IPv4 packet");
-        assert_eq!(ip_pkt.src_addr(), Ipv4Address::new(172, 16, 0, 2));
-        assert_eq!(ip_pkt.dst_addr(), Ipv4Address::new(162, 159, 192, 1));
-        assert_eq!(ip_pkt.next_header(), smoltcp::wire::IpProtocol::Udp);
-
-        let udp_pkt = UdpPacket::new_checked(ip_pkt.payload()).expect("Valid UDP packet");
-        assert_eq!(udp_pkt.src_port(), 51820);
-        assert_eq!(udp_pkt.dst_port(), 2408);
-        assert_eq!(udp_pkt.payload(), payload);
-        assert!(udp_pkt.verify_checksum(&ip_pkt.src_addr().into(), &ip_pkt.dst_addr().into()));
-    }
-
-    #[test]
-    fn test_update_checksum_rfc1624() {
-        // Identity check: modifying val to itself preserves checksum
-        let identity = update_checksum_rfc1624(0x1234, 0xabcd, 0xabcd);
-        assert_eq!(identity, 0x1234);
-    }
-
-    #[test]
-    fn test_clamp_tcp_mss_ipv4() {
-        let src_ip = Ipv4Address::new(192, 168, 1, 100);
-        let dst_ip = Ipv4Address::new(128, 116, 44, 3);
-
-        // Build TCP SYN packet with MSS = 1460 (20 bytes IP + 24 bytes TCP with 4-byte MSS option)
-        let mut ip_buf = vec![0u8; 44];
-        {
-            let mut ip_pkt = smoltcp::wire::Ipv4Packet::new_unchecked(&mut ip_buf);
-            ip_pkt.set_version(4);
-            ip_pkt.set_header_len(20);
-            ip_pkt.set_total_len(44);
-            ip_pkt.set_next_header(smoltcp::wire::IpProtocol::Tcp);
-            ip_pkt.set_hop_limit(64);
-            ip_pkt.set_src_addr(src_ip);
-            ip_pkt.set_dst_addr(dst_ip);
-            ip_pkt.fill_checksum();
-
-            let tcp_repr = TcpRepr {
-                src_port: 49152,
-                dst_port: 443,
-                control: TcpControl::Syn,
-                seq_number: smoltcp::wire::TcpSeqNumber(1000),
-                ack_number: None,
-                window_len: 65535,
-                window_scale: None,
-                max_seg_size: Some(1460),
-                sack_permitted: false,
-                sack_ranges: [None, None, None],
-                timestamp: None,
-                payload: &[],
-            };
-
-            let mut tcp_pkt = TcpPacket::new_unchecked(ip_pkt.payload_mut());
-            tcp_repr.emit(
-                &mut tcp_pkt,
-                &src_ip.into(),
-                &dst_ip.into(),
-                &smoltcp::phy::ChecksumCapabilities::default(),
-            );
-        }
-
-        // Verify initial checksum with smoltcp
-        let check_tcp = TcpPacket::new_checked(&ip_buf[20..]).expect("Valid initial TCP packet");
-        assert!(check_tcp.verify_checksum(&src_ip.into(), &dst_ip.into()));
-
-        // Clamp to 1120
-        clamp_tcp_mss(&mut ip_buf, 1120);
-
-        // Verify clamped MSS value and valid TCP checksum after incremental update
-        let clamped_tcp = TcpPacket::new_checked(&ip_buf[20..]).expect("Valid clamped TCP packet");
-        let clamped_repr = TcpRepr::parse(
-            &clamped_tcp,
-            &src_ip.into(),
-            &dst_ip.into(),
-            &smoltcp::phy::ChecksumCapabilities::default(),
-        )
-        .expect("Valid parse");
-        assert_eq!(clamped_repr.max_seg_size, Some(1120));
-        assert!(
-            clamped_tcp.verify_checksum(&src_ip.into(), &dst_ip.into()),
-            "Incremental RFC 1624 checksum must verify"
-        );
-    }
-
-    #[test]
-    fn test_clamp_tcp_mss_non_syn_ignored() {
-        let src_ip = Ipv4Address::new(192, 168, 1, 100);
-        let dst_ip = Ipv4Address::new(128, 116, 44, 3);
-
-        // Build TCP ACK packet without SYN
-        let mut ip_buf = vec![0u8; 40];
-        {
-            let mut ip_pkt = smoltcp::wire::Ipv4Packet::new_unchecked(&mut ip_buf);
-            ip_pkt.set_version(4);
-            ip_pkt.set_header_len(20);
-            ip_pkt.set_total_len(40);
-            ip_pkt.set_next_header(smoltcp::wire::IpProtocol::Tcp);
-            ip_pkt.set_hop_limit(64);
-            ip_pkt.set_src_addr(src_ip);
-            ip_pkt.set_dst_addr(dst_ip);
-            ip_pkt.fill_checksum();
-
-            let tcp_repr = TcpRepr {
-                src_port: 49152,
-                dst_port: 443,
-                control: TcpControl::None,
-                seq_number: smoltcp::wire::TcpSeqNumber(1001),
-                ack_number: Some(smoltcp::wire::TcpSeqNumber(5000)),
-                window_len: 65535,
-                window_scale: None,
-                max_seg_size: None,
-                sack_permitted: false,
-                sack_ranges: [None, None, None],
-                timestamp: None,
-                payload: &[],
-            };
-
-            let mut tcp_pkt = TcpPacket::new_unchecked(ip_pkt.payload_mut());
-            tcp_repr.emit(
-                &mut tcp_pkt,
-                &src_ip.into(),
-                &dst_ip.into(),
-                &smoltcp::phy::ChecksumCapabilities::default(),
-            );
-        }
-
-        let orig = ip_buf.clone();
-        clamp_tcp_mss(&mut ip_buf, 1120);
-        assert_eq!(ip_buf, orig, "Non-SYN packet must remain untouched");
-    }
-
-    #[test]
-    fn test_clamp_tcp_mss_fragmented_packet_ignored() {
-        // Build a mock packet with non-zero fragment offset
-        let mut ip_buf = vec![0u8; 44];
-        ip_buf[0] = 0x45; // IPv4, ihl 5
-        ip_buf[2..4].copy_from_slice(&44u16.to_be_bytes());
-        ip_buf[6..8].copy_from_slice(&0x0040u16.to_be_bytes()); // Frag offset = 64
-        ip_buf[9] = 6; // TCP
-        ip_buf[20 + 13] = 0x02; // SYN flag byte in payload
-
-        let orig = ip_buf.clone();
-        clamp_tcp_mss(&mut ip_buf, 1120);
-        assert_eq!(ip_buf, orig, "Fragmented packet must be ignored");
-    }
-
-    #[test]
-    fn test_is_roblox_gameplay_udp() {
-        let src = Ipv4Addr::new(172, 16, 0, 2);
-        // 128.116.44.3 is within 128.116.0.0/17 (44 < 128)
-        let dst_game = Ipv4Addr::new(128, 116, 44, 3);
-        let valid_gameplay = build_ipv4_udp_packet(src, dst_game, 51820, 58000, b"raknet_payload");
-        assert!(
-            is_roblox_gameplay_udp(&valid_gameplay),
-            "UDP port 58000 on 128.116.44.3 must be recognized as Roblox gameplay"
-        );
-
-        // Boundary checks for non-privileged UDP port range (1024..=65535)
-        let boundary_gameplay =
-            build_ipv4_udp_packet(src, dst_game, 51820, 1024, b"raknet_payload");
-        assert!(
-            is_roblox_gameplay_udp(&boundary_gameplay),
-            "UDP port 1024 must be recognized as Roblox gameplay"
-        );
-
-        let below_boundary = build_ipv4_udp_packet(src, dst_game, 51820, 1023, b"raknet_payload");
-        assert!(
-            !is_roblox_gameplay_udp(&below_boundary),
-            "Privileged UDP port 1023 must NOT be recognized as Roblox gameplay"
-        );
-
-        // Out of port range (port 80)
-        let web_udp = build_ipv4_udp_packet(src, dst_game, 51820, 80, b"raknet_payload");
-        assert!(
-            !is_roblox_gameplay_udp(&web_udp),
-            "UDP port 80 must NOT be recognized as Roblox gameplay"
-        );
-
-        // Out of CIDR (128.116.128.1 has 17th bit set, outside 128.116.0.0/17)
-        let dst_out = Ipv4Addr::new(128, 116, 128, 1);
-        let out_gameplay = build_ipv4_udp_packet(src, dst_out, 51820, 58000, b"raknet_payload");
-        assert!(
-            !is_roblox_gameplay_udp(&out_gameplay),
-            "128.116.128.1 is outside /17 and must not match"
-        );
-
-        // Voice STUN/SRTP ports (3478, 5349) must NOT be identified as RakNet gameplay
-        let voice_stun_3478 = build_ipv4_udp_packet(src, dst_game, 51820, 3478, b"stun_payload");
-        assert!(
-            !is_roblox_gameplay_udp(&voice_stun_3478),
-            "STUN port 3478 must NOT be recognized as RakNet gameplay (it is Voice)"
-        );
-        let voice_stun_5349 = build_ipv4_udp_packet(src, dst_game, 51820, 5349, b"stun_payload");
-        assert!(
-            !is_roblox_gameplay_udp(&voice_stun_5349),
-            "STUN port 5349 must NOT be recognized as RakNet gameplay (it is Voice)"
-        );
-
-        // Different IP entirely
-        let dst_other = Ipv4Addr::new(1, 1, 1, 1);
-        let other_pkt = build_ipv4_udp_packet(src, dst_other, 51820, 58000, b"raknet_payload");
-        assert!(
-            !is_roblox_gameplay_udp(&other_pkt),
-            "1.1.1.1 is not Roblox gameplay"
-        );
-    }
-
-    #[test]
-    fn test_is_roblox_control_plane_tcp() {
-        let src = Ipv4Addr::new(172, 16, 0, 2);
-        let dst_control = Ipv4Addr::new(128, 116, 5, 3);
-        let control_ips = vec![dst_control];
-        let mut ip_buf = vec![0u8; 40];
-        ip_buf[0] = 0x45;
-        ip_buf[2..4].copy_from_slice(&40u16.to_be_bytes());
-        ip_buf[9] = 6;
-        ip_buf[12..16].copy_from_slice(&src.octets());
-        ip_buf[16..20].copy_from_slice(&dst_control.octets());
-        ip_buf[22..24].copy_from_slice(&443u16.to_be_bytes());
-
-        assert!(is_roblox_control_plane_tcp(&ip_buf, &control_ips));
-
-        ip_buf[22..24].copy_from_slice(&80u16.to_be_bytes());
-        assert!(!is_roblox_control_plane_tcp(&ip_buf, &control_ips));
-    }
-
-    #[test]
-    fn test_is_roblox_voice_traffic() {
-        let src = Ipv4Addr::new(172, 16, 0, 2);
-        let dst_voice = Ipv4Addr::new(128, 116, 10, 10);
-        let voice_ips = vec![dst_voice];
-        let pkt = build_ipv4_udp_packet(src, dst_voice, 51820, 3478, b"voice_payload");
-        assert!(is_roblox_voice_traffic(&pkt, &voice_ips));
-
-        let pkt5349 = build_ipv4_udp_packet(src, dst_voice, 51820, 5349, b"voice_payload");
-        assert!(is_roblox_voice_traffic(&pkt5349, &voice_ips));
-
-        let pkt_other = build_ipv4_udp_packet(src, dst_voice, 51820, 50000, b"game_payload");
-        assert!(is_roblox_voice_traffic(&pkt_other, &voice_ips));
-
-        let other_ip = Ipv4Addr::new(1, 1, 1, 1);
-        let pkt_not_voice = build_ipv4_udp_packet(src, other_ip, 51820, 80, b"other");
-        assert!(!is_roblox_voice_traffic(&pkt_not_voice, &[]));
-    }
-
-    #[test]
-    fn test_translate_ipv4_udp_src_and_dst_checksums() {
-        let old_src = Ipv4Addr::new(172, 16, 0, 2);
-        let new_src = Ipv4Addr::new(172, 16, 0, 3);
-        let old_dst = Ipv4Addr::new(162, 159, 192, 1);
-        let new_dst = Ipv4Addr::new(162, 159, 192, 2);
-        let mut pkt = build_ipv4_udp_packet(old_src, old_dst, 51820, 2408, b"test payload");
-
-        translate_ipv4_udp_src(&mut pkt, old_src, new_src);
-        translate_ipv4_udp_dst(&mut pkt, old_dst, new_dst);
-
-        let ip_pkt = smoltcp::wire::Ipv4Packet::new_checked(&pkt).expect("Valid IP");
-        assert_eq!(
-            ip_pkt.src_addr(),
-            smoltcp::wire::Ipv4Address::new(172, 16, 0, 3)
-        );
-        assert_eq!(
-            ip_pkt.dst_addr(),
-            smoltcp::wire::Ipv4Address::new(162, 159, 192, 2)
-        );
-        let udp_pkt = smoltcp::wire::UdpPacket::new_checked(ip_pkt.payload()).expect("Valid UDP");
-        assert!(udp_pkt.verify_checksum(&ip_pkt.src_addr().into(), &ip_pkt.dst_addr().into()));
-    }
-
-    #[test]
-    fn test_split_tunneling_raknet_vs_control_plane_routing() {
-        let src = Ipv4Addr::new(172, 16, 0, 2);
-        let dst_game = Ipv4Addr::new(128, 116, 44, 3);
-        let game_pkt = build_ipv4_udp_packet(src, dst_game, 51820, 58000, b"raknet_game");
-        assert!(is_roblox_gameplay_udp(&game_pkt));
-        assert!(!is_roblox_control_plane_tcp(&game_pkt, &[]));
-    }
-
-    #[test]
-    fn test_raknet_packet_on_hop1_port_not_misidentified_as_hop2() {
-        let src = Ipv4Addr::new(172, 16, 0, 2);
-        let dst_game = Ipv4Addr::new(128, 116, 44, 3);
-        let game_pkt = build_ipv4_udp_packet(src, dst_game, 51820, 58000, b"raknet_game");
-        assert!(is_roblox_gameplay_udp(&game_pkt));
-    }
-
-    #[test]
-    fn test_split_tunneling_with_different_hop1_hop2_ips() {
-        let hop1_ip = Ipv4Addr::new(172, 16, 0, 2);
-        let hop2_ip = Ipv4Addr::new(172, 16, 0, 3);
-        assert_ne!(hop1_ip, hop2_ip);
-    }
-
-    #[test]
-    fn test_decapsulate_incoming_drains_queued_packets() {
-        let acc1 = WarpAccount {
-            id: "test1".into(),
-            token: "tok1".into(),
-            private_key: BASE64_STANDARD.encode([1u8; 32]),
-            public_key: BASE64_STANDARD.encode([2u8; 32]),
-            peer_public_key: BASE64_STANDARD.encode([3u8; 32]),
-            peer_endpoint: "162.159.192.1:500".into(),
-            local_ipv4: "172.16.0.2".into(),
-            local_ipv6: "".into(),
-            reserved: [0, 0, 0],
-        };
-        let acc2 = WarpAccount {
-            id: "test2".into(),
-            token: "tok2".into(),
-            private_key: BASE64_STANDARD.encode([4u8; 32]),
-            public_key: BASE64_STANDARD.encode([5u8; 32]),
-            peer_public_key: BASE64_STANDARD.encode([6u8; 32]),
-            peer_endpoint: "188.114.97.3:2408".into(),
-            local_ipv4: "172.16.0.2".into(),
-            local_ipv6: "".into(),
-            reserved: [0, 0, 0],
-        };
-        let mut tunnel = DualHopTunnel::new(&acc1, &acc2, "162.159.192.1:500", "188.114.97.3:2408").unwrap();
-        let mut outer = [0u8; 2048];
-        let mut inner = [0u8; 2048];
-
-        // 1. Single hop mode draining with empty/invalid datagram terminates cleanly
-        tunnel.is_single = true;
-        let outcome = tunnel.decapsulate_incoming(&[0u8; 32], &mut outer, &mut inner);
-        assert!(outcome.to_user.is_empty());
-        assert!(outcome.to_network.is_empty());
-
-        // 2. Dual hop mode draining with invalid datagram terminates cleanly
-        tunnel.is_single = false;
-        let outcome2 = tunnel.decapsulate_incoming(&[0u8; 32], &mut outer, &mut inner);
-        assert!(outcome2.to_user.is_empty());
-        assert!(outcome2.to_network.is_empty());
-    }
-
-    #[test]
-    fn test_decapsulate_incoming_drains_queued_packets_hop2() {
-        let acc1 = WarpAccount {
-            id: "test1".into(),
-            token: "tok1".into(),
-            private_key: BASE64_STANDARD.encode([1u8; 32]),
-            public_key: BASE64_STANDARD.encode([2u8; 32]),
-            peer_public_key: BASE64_STANDARD.encode([3u8; 32]),
-            peer_endpoint: "162.159.192.1:500".into(),
-            local_ipv4: "172.16.0.2".into(),
-            local_ipv6: "".into(),
-            reserved: [1, 2, 3],
-        };
-        let acc2 = WarpAccount {
-            id: "test2".into(),
-            token: "tok2".into(),
-            private_key: BASE64_STANDARD.encode([4u8; 32]),
-            public_key: BASE64_STANDARD.encode([5u8; 32]),
-            peer_public_key: BASE64_STANDARD.encode([6u8; 32]),
-            peer_endpoint: "188.114.97.3:2408".into(),
-            local_ipv4: "172.16.0.2".into(),
-            local_ipv6: "".into(),
-            reserved: [4, 5, 6],
-        };
-        let mut tunnel = DualHopTunnel::new(&acc1, &acc2, "162.159.192.1:500", "188.114.97.3:2408").unwrap();
-        let mut outer = [0u8; 2048];
-        let mut inner = [0u8; 2048];
-
-        // Format a Hop 2 handshake packet: it produces an encapsulated packet for Hop 1
-        let hop2_handshake = tunnel.format_hop2_handshake(&mut inner, &mut outer, true);
-        assert!(hop2_handshake.is_some());
-        let outer_pkt = hop2_handshake.unwrap();
-        assert!(!outer_pkt.is_empty());
-
-        // Reserved bytes are correctly applied to outer packet
-        assert_eq!(outer_pkt[1..4], [1, 2, 3]);
-
-        // Decapsulate empty slice on Hop 2 draining loop terminates cleanly
-        let outcome = tunnel.decapsulate_incoming(&[], &mut outer, &mut inner);
-        assert!(outcome.to_user.is_empty());
-    }
-
-    #[test]
-    fn test_snat_outbound_and_inbound() {
-        let acc1 = WarpAccount {
-            id: "test1".into(),
-            token: "tok1".into(),
-            private_key: BASE64_STANDARD.encode([1u8; 32]),
-            public_key: BASE64_STANDARD.encode([2u8; 32]),
-            peer_public_key: BASE64_STANDARD.encode([3u8; 32]),
-            peer_endpoint: "162.159.192.1:500".into(),
-            local_ipv4: "172.16.0.2".into(),
-            local_ipv6: "".into(),
-            reserved: [0, 0, 0],
-        };
-        let acc2 = WarpAccount {
-            id: "test2".into(),
-            token: "tok2".into(),
-            private_key: BASE64_STANDARD.encode([4u8; 32]),
-            public_key: BASE64_STANDARD.encode([5u8; 32]),
-            peer_public_key: BASE64_STANDARD.encode([6u8; 32]),
-            peer_endpoint: "188.114.97.3:2408".into(),
-            local_ipv4: "172.16.0.2".into(),
-            local_ipv6: "".into(),
-            reserved: [0, 0, 0],
-        };
-        let mut tunnel = DualHopTunnel::new(&acc1, &acc2, "162.159.192.1:500", "188.114.97.3:2408").unwrap();
-
-        // Construct an outbound UDP packet with Source IP 10.2.0.2:55555 and Destination IP 128.116.31.33:57341
-        let orig_src = Ipv4Addr::new(10, 2, 0, 2);
-        let dst_ip = Ipv4Addr::new(128, 116, 31, 33);
-        let src_port = 55555u16;
-        let dst_port = 57341u16;
-        let payload = b"ROBLOX_UDP_TEST";
-        let mut pkt = build_ipv4_udp_packet(orig_src, dst_ip, src_port, dst_port, payload);
-
-        // Pre-encapsulation SNAT check:
-        let target_ip = tunnel.hop2_ip;
-        let ihl = (pkt[0] & 0x0f) as usize * 4;
-        let s_ip = Ipv4Addr::new(pkt[12], pkt[13], pkt[14], pkt[15]);
-        let s_port = u16::from_be_bytes([pkt[ihl], pkt[ihl + 1]]);
-        assert_eq!(s_ip, orig_src);
-        assert_eq!(s_port, src_port);
-
-        // Process through encapsulate_user_packet (or direct SNAT block)
-        let mut outer_buf = [0u8; 2048];
-        let mut inner_buf = [0u8; 2048];
-        let _ = tunnel.encapsulate_user_packet(&mut pkt, &mut inner_buf, &mut outer_buf);
-
-        // Verify pkt has been rewritten to 172.16.0.2
-        let rewritten_s_ip = Ipv4Addr::new(pkt[12], pkt[13], pkt[14], pkt[15]);
-        assert_eq!(rewritten_s_ip, target_ip);
-        assert_eq!(tunnel.snat_map.get(&src_port), Some(&orig_src));
-
-        // Now test inbound return packet from 128.116.31.33:57341 to 172.16.0.2:55555
-        let reply_payload = b"ROBLOX_UDP_REPLY";
-        let mut reply_pkt = build_ipv4_udp_packet(dst_ip, target_ip, dst_port, src_port, reply_payload);
-
-        tunnel.apply_inbound_snat(&mut reply_pkt);
-
-        // Verify return packet has destination IP rewritten back to 10.2.0.2
-        let restored_dst = Ipv4Addr::new(reply_pkt[16], reply_pkt[17], reply_pkt[18], reply_pkt[19]);
-        assert_eq!(restored_dst, orig_src);
-    }
 }

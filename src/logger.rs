@@ -32,54 +32,13 @@ static VERBOSE: AtomicBool = AtomicBool::new(false);
 static MIN_LEVEL: std::sync::atomic::AtomicU8 =
     std::sync::atomic::AtomicU8::new(LogLevel::Info as u8);
 
-/// Generate an ISO 8601-style UTC timestamp string with milliseconds.
+const MAX_LOG_SIZE: u64 = 10 * 1024 * 1024; // 10 MB
+
+/// Generate an ISO 8601-style local timestamp string with milliseconds.
 pub fn timestamp_now() -> String {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    let now = SystemTime::now();
-    let duration = now.duration_since(UNIX_EPOCH).unwrap_or_default();
-    let secs = duration.as_secs();
-    let millis = duration.subsec_millis();
-
-    let rem_secs = secs % 86400;
-    let hours = rem_secs / 3600;
-    let minutes = (rem_secs % 3600) / 60;
-    let seconds = rem_secs % 60;
-
-    let days = secs / 86400;
-    let mut year = 1970;
-    let mut day_count = days;
-    loop {
-        let leap = if (year % 4 == 0 && year % 100 != 0) || (year % 400 == 0) {
-            1
-        } else {
-            0
-        };
-        let days_in_year = 365 + leap;
-        if day_count < days_in_year {
-            let days_in_months = [31, 28 + leap, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
-            for (month, &dim) in (1..).zip(days_in_months.iter()) {
-                if day_count < dim {
-                    return format!(
-                        "{:04}-{:02}-{:02} {:02}:{:02}:{:02}.{:03}",
-                        year,
-                        month,
-                        day_count + 1,
-                        hours,
-                        minutes,
-                        seconds,
-                        millis
-                    );
-                }
-                day_count -= dim;
-            }
-            return format!(
-                "{:04}-12-31 {:02}:{:02}:{:02}.{:03}",
-                year, hours, minutes, seconds, millis
-            );
-        }
-        day_count -= days_in_year;
-        year += 1;
-    }
+    chrono::Local::now()
+        .format("%Y-%m-%d %H:%M:%S%.3f")
+        .to_string()
 }
 
 /// Recursively formats an error and all its chained underlying causes.
@@ -146,12 +105,25 @@ pub fn log(level: LogLevel, message: &str) {
     let ts = timestamp_now();
     let file_line = format!("[{}] [{}] {}\n", ts, level, message);
 
-    // Write to persistent log file immediately with auto-flush
+    // Write to persistent log file immediately with auto-flush and 10MB rotation
     if let Ok(mut guard) = LOG_FILE.lock()
         && let Some(ref mut file) = *guard
     {
         let _ = file.write_all(file_line.as_bytes());
         let _ = file.flush();
+
+        // Check for rotation if file exceeds 10 MB
+        if let Ok(meta) = file.metadata()
+            && meta.len() > MAX_LOG_SIZE
+            && let Ok(path_guard) = LOG_PATH.lock()
+            && let Some(ref path) = *path_guard
+        {
+            let backup = path.with_extension("log.1");
+            let _ = std::fs::rename(path, &backup);
+            if let Ok(new_file) = OpenOptions::new().create(true).append(true).open(path) {
+                *file = new_file;
+            }
+        }
     }
 
     // Write to console with appropriate standard stream
@@ -287,7 +259,10 @@ mod tests {
     #[test]
     fn test_logger_file_write() {
         let temp_dir = std::env::temp_dir();
-        let log_file = temp_dir.join(format!("test_warp_min_logger_{}.log", rand::random::<u32>()));
+        let log_file = temp_dir.join(format!(
+            "test_warp_min_logger_{}.log",
+            rand::random::<u32>()
+        ));
         let log_str = log_file.to_str().unwrap();
 
         // 1. Test basic write capability at Debug level
@@ -302,7 +277,10 @@ mod tests {
         let _ = std::fs::remove_file(&log_file);
 
         // 2. Test level filtering at Warn level
-        let log_file_filter = temp_dir.join(format!("test_warp_min_filter_{}.log", rand::random::<u32>()));
+        let log_file_filter = temp_dir.join(format!(
+            "test_warp_min_filter_{}.log",
+            rand::random::<u32>()
+        ));
         let log_filter_str = log_file_filter.to_str().unwrap();
 
         init(Some(log_filter_str), LogLevel::Warn);
