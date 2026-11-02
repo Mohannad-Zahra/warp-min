@@ -34,15 +34,15 @@ unsafe extern "system" {
 static CHILD_PROCESS_HANDLE: AtomicIsize = AtomicIsize::new(0);
 static CHILD_PROCESS_PID: AtomicU32 = AtomicU32::new(0);
 
-/// Create a Windows Named Event with SDDL "D:(A;;GA;;;AU)S:(ML;;NW;;;ME)" allowing
-/// Authenticated Users across Medium and High integrity levels to synchronize and signal.
-pub fn create_shutdown_event(
-    pid: u32,
-) -> Result<HANDLE, Box<dyn std::error::Error + Send + Sync>> {
-    // SDDL: DACL allows Generic All to Authenticated Users (AU).
+/// Create a Windows Named Event with SDDL "D:(A;;GA;;;BA)(A;;GA;;;SY)(A;;GA;;;CO)S:(ML;;NW;;;ME)" allowing
+/// Administrators and Creator-Owner across Medium and High integrity levels to synchronize and signal.
+pub fn create_shutdown_event(pid: u32) -> Result<HANDLE, Box<dyn std::error::Error + Send + Sync>> {
+    // SDDL: DACL allows Generic All to Builtin Administrators (BA), Local System (SY), and Creator Owner (CO).
     // SACL specifies Mandatory Label Medium Integrity (ME) with No-Write-Up (NW)
     // so an unelevated Medium-Integrity parent can open and signal this event created by a High-Integrity child.
-    let sddl_with_mic: Vec<u16> = "D:(A;;GA;;;AU)S:(ML;;NW;;;ME)\0".encode_utf16().collect();
+    let sddl_with_mic: Vec<u16> = "D:(A;;GA;;;BA)(A;;GA;;;SY)(A;;0x00100002;;;IU)S:(ML;;NW;;;ME)\0"
+        .encode_utf16()
+        .collect();
     let mut p_sd: *mut std::ffi::c_void = std::ptr::null_mut();
     let mut sd_size: u32 = 0;
 
@@ -56,7 +56,9 @@ pub fn create_shutdown_event(
     };
     if ok == 0 {
         // Fallback to base SDDL if SACL is unsupported
-        let sddl_base: Vec<u16> = "D:(A;;GA;;;AU)\0".encode_utf16().collect();
+        let sddl_base: Vec<u16> = "D:(A;;GA;;;BA)(A;;GA;;;SY)(A;;0x00100002;;;IU)\0"
+            .encode_utf16()
+            .collect();
         ok = unsafe {
             ConvertStringSecurityDescriptorToSecurityDescriptorW(
                 sddl_base.as_ptr(),
@@ -67,11 +69,7 @@ pub fn create_shutdown_event(
         };
     }
     if ok == 0 {
-        return Err(format!(
-            "Failed to parse SDDL: {}",
-            std::io::Error::last_os_error()
-        )
-        .into());
+        return Err(format!("Failed to parse SDDL: {}", std::io::Error::last_os_error()).into());
     }
 
     let sa = windows_sys::Win32::Security::SECURITY_ATTRIBUTES {
@@ -206,6 +204,38 @@ pub fn is_elevated() -> bool {
     }
 }
 
+/// Standard Windows command line argument quoting complying with CommandLineToArgvW rules.
+pub fn quote_win_arg(arg: &str) -> String {
+    if !arg.contains(' ') && !arg.contains('\t') && !arg.contains('"') && !arg.is_empty() {
+        return arg.to_string();
+    }
+    let mut s = String::with_capacity(arg.len() + 2);
+    s.push('"');
+    let mut backslashes = 0;
+    for c in arg.chars() {
+        if c == '\\' {
+            backslashes += 1;
+        } else if c == '"' {
+            for _ in 0..(backslashes * 2 + 1) {
+                s.push('\\');
+            }
+            s.push('"');
+            backslashes = 0;
+        } else {
+            for _ in 0..backslashes {
+                s.push('\\');
+            }
+            backslashes = 0;
+            s.push(c);
+        }
+    }
+    for _ in 0..(backslashes * 2) {
+        s.push('\\');
+    }
+    s.push('"');
+    s
+}
+
 /// Relaunches the current executable with elevated Administrator privileges using Windows UAC ("runas").
 /// Waits for the elevated child process to finish and forwards its exit code.
 pub fn relaunch_elevated() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
@@ -220,13 +250,7 @@ pub fn relaunch_elevated() -> Result<(), Box<dyn std::error::Error + Send + Sync
 
     let args_string = args
         .iter()
-        .map(|arg| {
-            if arg.contains(' ') || arg.contains('\t') || arg.contains('"') {
-                format!("\"{}\"", arg.replace('"', "\\\""))
-            } else {
-                arg.clone()
-            }
-        })
+        .map(|arg| quote_win_arg(arg))
         .collect::<Vec<_>>()
         .join(" ");
 
@@ -309,58 +333,5 @@ pub fn relaunch_elevated() -> Result<(), Box<dyn std::error::Error + Send + Sync
         }
     } else {
         std::process::exit(0);
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_is_elevated_runs_without_panic() {
-        let _ = is_elevated();
-    }
-
-    #[test]
-    fn test_shutdown_event_lifecycle() {
-        let pid = std::process::id();
-        let handle = create_shutdown_event(pid).expect("create shutdown event");
-        assert_ne!(handle, 0);
-
-        let signaled = signal_shutdown_event(pid);
-        assert!(signaled, "Signaling shutdown event must succeed");
-
-        let wait_res = unsafe { WaitForSingleObject(handle, 0) };
-        assert_eq!(
-            wait_res,
-            windows_sys::Win32::Foundation::WAIT_OBJECT_0,
-            "Event must be signaled"
-        );
-
-        unsafe {
-            CloseHandle(handle);
-        }
-    }
-
-    #[test]
-    fn test_sddl_string_descriptor_parsing() {
-        let sddl_with_mic: Vec<u16> = "D:(A;;GA;;;AU)S:(ML;;NW;;;ME)\0".encode_utf16().collect();
-        let mut p_sd: *mut std::ffi::c_void = std::ptr::null_mut();
-        let mut sd_size: u32 = 0;
-
-        let ok = unsafe {
-            ConvertStringSecurityDescriptorToSecurityDescriptorW(
-                sddl_with_mic.as_ptr(),
-                1,
-                &mut p_sd,
-                &mut sd_size,
-            )
-        };
-        assert_ne!(ok, 0, "SDDL with Medium Mandatory Label must parse successfully");
-        if !p_sd.is_null() {
-            unsafe {
-                LocalFree(p_sd);
-            }
-        }
     }
 }

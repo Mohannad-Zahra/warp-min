@@ -1,6 +1,6 @@
-# Fixed Bulletproof Forensic Audit Script for WARP-MIN
+# Portable Forensic Audit Script for WARP-MIN
 $ErrorActionPreference = 'Continue'
-$workspace = 'B:\Akuma\Warper'
+$workspace = (Resolve-Path "$PSScriptRoot\..").Path
 $out = "$workspace\forensics\run1"
 New-Item -ItemType Directory -Force $out | Out-Null
 Set-Location $workspace
@@ -59,7 +59,12 @@ Get-WinEvent -FilterHashtable @{LogName='Security'; Id=5152,5157,5156,5159; Star
     Select-Object TimeCreated, Id, @{n='Msg';e={$_.Message}} |
     Format-List | Out-File "$out\security_events.txt" -Width 400
 
-# 8. Mark complete
+# 8. Revert WFP kernel audit logging to prevent event log bloat
+Write-Host "[*] Reverting WFP kernel audit logging..." -ForegroundColor Yellow
+auditpol /set /subcategory:"Filtering Platform Packet Drop" /success:disable /failure:disable | Out-Null
+auditpol /set /subcategory:"Filtering Platform Connection" /success:disable /failure:disable | Out-Null
+
+# 9. Mark complete
 'DONE' | Out-File "$out\DONE.txt" -Force
 Write-Host "=================================================================" -ForegroundColor Cyan
 Write-Host "  AUDIT COMPLETE! All traces saved to $out" -ForegroundColor Green

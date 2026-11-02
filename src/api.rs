@@ -133,72 +133,44 @@ pub async fn register_account_with_proxy(
         locale: "en_US",
         warp_enabled: true,
     };
-    let json_body = serde_json::to_string(&reg_req)?;
 
-    let resp_text = if let Some(proxy) = proxy_addr {
+    let client_builder = reqwest::Client::builder().timeout(Duration::from_secs(10));
+    let client = if let Some(proxy) = proxy_addr {
         println!(
-            "[*] Registering new WARP identity through SOCKS5 proxy ({}) via curl...",
+            "[*] Registering new WARP identity through SOCKS5 proxy ({})...",
             proxy
         );
-        let mut child = std::process::Command::new("curl.exe")
-            .args([
-                "-s",
-                "--socks5-hostname",
-                proxy,
-                "-H",
-                "Content-Type: application/json; charset=UTF-8",
-                "-H",
-                "User-Agent: okhttp/3.12.1",
-                "-H",
-                "CF-Client-Version: a-6.30-3596",
-                "-X",
-                "POST",
-                "--data-binary",
-                "@-",
-                CF_API_ENDPOINT,
-            ])
-            .stdin(std::process::Stdio::piped())
-            .stdout(std::process::Stdio::piped())
-            .spawn()?;
-
-        if let Some(mut stdin) = child.stdin.take() {
-            use std::io::Write;
-            stdin.write_all(json_body.as_bytes())?;
-        }
-        let output = child.wait_with_output()?;
-        if !output.status.success() {
-            return Err("Failed to execute curl for registration".into());
-        }
-        let body_str = String::from_utf8_lossy(&output.stdout).to_string();
-        if body_str.contains("\"success\":false") {
-            return Err(format!("Cloudflare registration failed: {}", body_str).into());
-        }
-        body_str
+        let proxy_url = if proxy.starts_with("socks5://") || proxy.starts_with("socks5h://") {
+            proxy.to_string()
+        } else {
+            format!("socks5h://{}", proxy)
+        };
+        client_builder
+            .proxy(reqwest::Proxy::all(&proxy_url)?)
+            .build()?
     } else {
-        let client = reqwest::Client::builder()
-            .timeout(Duration::from_secs(10))
-            .build()?;
-
-        let resp = client
-            .post(CF_API_ENDPOINT)
-            .header("Content-Type", "application/json; charset=UTF-8")
-            .header("User-Agent", "okhttp/3.12.1")
-            .header("CF-Client-Version", "a-6.30-3596")
-            .json(&reg_req)
-            .send()
-            .await?;
-
-        if !resp.status().is_success() {
-            let status = resp.status();
-            let text = resp.text().await.unwrap_or_default();
-            return Err(format!(
-                "Cloudflare registration failed with status {}: {}",
-                status, text
-            )
-            .into());
-        }
-        resp.text().await?
+        client_builder.build()?
     };
+
+    let resp = client
+        .post(CF_API_ENDPOINT)
+        .header("Content-Type", "application/json; charset=UTF-8")
+        .header("User-Agent", "okhttp/3.12.1")
+        .header("CF-Client-Version", "a-6.30-3596")
+        .json(&reg_req)
+        .send()
+        .await?;
+
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let text = resp.text().await.unwrap_or_default();
+        return Err(format!(
+            "Cloudflare registration failed with status {}: {}",
+            status, text
+        )
+        .into());
+    }
+    let resp_text = resp.text().await?;
 
     let reg_resp: RegResponse = serde_json::from_str(&resp_text)?;
     let id = reg_resp.id.ok_or("Missing id in response")?;
@@ -260,53 +232,7 @@ pub async fn register_account_with_proxy(
 }
 
 fn chrono_timestamp() -> String {
-    // Generate ISO 8601 timestamp string
-    use std::time::SystemTime;
-    let duration = SystemTime::now()
-        .duration_since(SystemTime::UNIX_EPOCH)
-        .unwrap_or_default();
-    let secs = duration.as_secs();
-    // Approximate UTC time formatting
-    let days = secs / 86400;
-    let rem_secs = secs % 86400;
-    let hours = rem_secs / 3600;
-    let minutes = (rem_secs % 3600) / 60;
-    let seconds = rem_secs % 60;
-
-    // Approximate year/month/day
-    let mut year = 1970;
-    let mut day_count = days;
-    loop {
-        let leap = if (year % 4 == 0 && year % 100 != 0) || (year % 400 == 0) {
-            1
-        } else {
-            0
-        };
-        let days_in_year = 365 + leap;
-        if day_count < days_in_year {
-            let days_in_months = [31, 28 + leap, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
-            for (month, &dim) in (1..).zip(days_in_months.iter()) {
-                if day_count < dim {
-                    return format!(
-                        "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z",
-                        year,
-                        month,
-                        day_count + 1,
-                        hours,
-                        minutes,
-                        seconds
-                    );
-                }
-                day_count -= dim;
-            }
-            return format!(
-                "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z",
-                year, 12, 31, hours, minutes, seconds
-            );
-        }
-        day_count -= days_in_year;
-        year += 1;
-    }
+    chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
 }
 
 #[cfg(test)]

@@ -72,19 +72,19 @@ Right-clicking the WARP-MIN tray icon presents a native Win32 context menu:
 |-------------------------------------------------------|
 |  [■] Disconnect                                       | <- Primary Action Toggle
 |-------------------------------------------------------|
-|  Latency Mode                                       > | -> [✓] Dual-Hop Subsea (41ms - MXP)
+|  Latency Mode                                       > | -> [] Dual-Hop Subsea (41ms - MXP)
 |                                                       |    [ ] Single-Hop Direct (Diagnostic)
 |-------------------------------------------------------|
-|  [⚡] Show In-Game Ping HUD                           | <- Opens micro floating overlay
-|  [🛡] Unlock Roblox Voice Chat Now                     | <- Runs GUAC surgery on demand
+|  [] Show In-Game Ping HUD                           | <- Opens micro floating overlay
+|  [] Unlock Roblox Voice Chat Now                     | <- Runs GUAC surgery on demand
 |  [↺] Reset Windows Network Routes                     | <- Emergency route table flush
 |-------------------------------------------------------|
-|  Settings                                           > | -> [✓] Start with Windows
-|                                                       |    [✓] Auto-Connect on Game Boot
-|                                                       |    [✓] Enable Low-Latency WLAN Fix
+|  Settings                                           > | -> [] Start with Windows
+|                                                       |    [] Auto-Connect on Game Boot
+|                                                       |    [] Enable Low-Latency WLAN Fix
 |-------------------------------------------------------|
-|  [📄] Open Log File (warp-min.log)                    |
-|  [✖] Exit WARP-MIN                                    |
+|  [] Open Log File (warp-min.log)                    |
+|  [] Exit WARP-MIN                                    |
 +-------------------------------------------------------+
 ```
 

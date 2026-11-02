@@ -20,7 +20,7 @@ static EPHEMERAL_PORT: AtomicU16 = AtomicU16::new(10000);
 struct ChannelDevice {
     caps: DeviceCapabilities,
     rx_queue: VecDeque<Vec<u8>>,
-    to_tunnel_tx: mpsc::UnboundedSender<Vec<u8>>,
+    to_tunnel_tx: mpsc::Sender<Vec<u8>>,
 }
 
 impl Device for ChannelDevice {
@@ -60,7 +60,7 @@ impl RxToken for ChannelRxToken {
     }
 }
 
-struct ChannelTxToken(mpsc::UnboundedSender<Vec<u8>>);
+struct ChannelTxToken(mpsc::Sender<Vec<u8>>);
 impl TxToken for ChannelTxToken {
     fn consume<R, F>(self, len: usize, f: F) -> R
     where
@@ -68,7 +68,7 @@ impl TxToken for ChannelTxToken {
     {
         let mut buf = vec![0u8; len];
         let res = f(&mut buf);
-        let _ = self.0.send(buf);
+        let _ = self.0.try_send(buf);
         res
     }
 }
@@ -124,8 +124,8 @@ impl NetstackHandle {
 
 pub fn spawn_netstack(
     local_ipv4: Ipv4Addr,
-    mut from_tunnel_rx: mpsc::UnboundedReceiver<Vec<u8>>,
-    to_tunnel_tx: mpsc::UnboundedSender<Vec<u8>>,
+    mut from_tunnel_rx: mpsc::Receiver<Vec<u8>>,
+    to_tunnel_tx: mpsc::Sender<Vec<u8>>,
 ) -> NetstackHandle {
     let (cmd_tx, mut cmd_rx) = mpsc::channel::<NetstackCmd>(64);
     let notify = Arc::new(Notify::new());
@@ -164,11 +164,15 @@ pub fn spawn_netstack(
         let mut connections: HashMap<usize, NetstackConnection> = HashMap::new();
         let mut next_conn_id: usize = 1;
 
-        let mut interval = tokio::time::interval(Duration::from_millis(2));
-
         loop {
+            let poll_delay = if connections.is_empty() {
+                Duration::from_millis(100)
+            } else {
+                Duration::from_millis(5)
+            };
+
             tokio::select! {
-                _ = interval.tick() => {},
+                _ = tokio::time::sleep(poll_delay) => {},
                 _ = notify_clone.notified() => {},
                 Some(packet) = from_tunnel_rx.recv() => {
                     dev.rx_queue.push_back(packet);
