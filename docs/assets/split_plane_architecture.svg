@@ -1,0 +1,131 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 920 440" width="100%" height="100%">
+  <defs>
+    <marker id="arrData" markerWidth="6" markerHeight="6" refX="4" refY="3" orient="auto">
+      <path d="M0,0 L0,6 L6,3 z" fill="#38bdf8" />
+    </marker>
+    <marker id="arrControl" markerWidth="6" markerHeight="6" refX="4" refY="3" orient="auto">
+      <path d="M0,0 L0,6 L6,3 z" fill="#a78bfa" />
+    </marker>
+  </defs>
+
+  <style>
+    .header { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; font-weight: 600; font-size: 15px; fill: #f8fafc; }
+    .col-title { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; font-weight: 600; font-size: 13px; fill: #e2e8f0; }
+    .node-title { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; font-weight: 600; font-size: 12px; fill: #f1f5f9; }
+    .desc { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; font-size: 11px; fill: #94a3b8; }
+    .code { font-family: Consolas, "Liberation Mono", Menlo, Courier, monospace; font-size: 11px; }
+    .tag { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; font-weight: 700; font-size: 10px; letter-spacing: 0.5px; }
+  </style>
+
+  <!-- Background -->
+  <rect width="920" height="440" fill="#0f172a" rx="8" stroke="#1e293b" stroke-width="1"/>
+
+  <!-- Legend -->
+  <g transform="translate(620, 20)">
+    <rect width="270" height="30" fill="#1e293b" stroke="#334155" stroke-width="1" rx="4"/>
+    <line x1="15" y1="15" x2="35" y2="15" stroke="#38bdf8" stroke-width="2"/>
+    <text x="45" y="19" class="tag" fill="#38bdf8">Data Plane (UDP)</text>
+    <line x1="150" y1="15" x2="170" y2="15" stroke="#a78bfa" stroke-width="2"/>
+    <text x="180" y="19" class="tag" fill="#a78bfa">Control Plane</text>
+  </g>
+
+  <!-- Header -->
+  <text x="30" y="38" class="header">Split-Plane Routing Architecture</text>
+
+  <!-- ==================== COLUMN 1: CLIENT ==================== -->
+  <g transform="translate(30, 65)">
+    <rect width="250" height="345" fill="#1e293b" stroke="#334155" stroke-width="1" rx="6"/>
+    <text x="15" y="28" class="col-title">Local Windows Client</text>
+
+    <!-- Roblox Process -->
+    <g transform="translate(15, 45)">
+      <rect width="220" height="50" fill="#0f172a" stroke="#334155" stroke-width="1" rx="4"/>
+      <text x="12" y="22" class="node-title">RobloxPlayerBeta.exe</text>
+      <text x="12" y="38" class="desc">Gameplay UDP + Auth/Voice HTTPS</text>
+    </g>
+
+    <!-- WARP-Gool TUN -->
+    <g transform="translate(15, 115)">
+      <rect width="220" height="95" fill="#0f172a" stroke="#38bdf8" stroke-width="1" rx="4"/>
+      <text x="12" y="22" class="tag" fill="#38bdf8">DATA PLANE</text>
+      <text x="12" y="42" class="node-title">Wintun: "WARP-Gool"</text>
+      <text x="12" y="60" class="code" fill="#7dd3fc">128.116.0.0/17 (Metric 1)</text>
+      <text x="12" y="78" class="desc">Win32 FFI Route Injection</text>
+    </g>
+
+    <!-- Primary VPN -->
+    <g transform="translate(15, 230)">
+      <rect width="220" height="95" fill="#0f172a" stroke="#a78bfa" stroke-width="1" rx="4"/>
+      <text x="12" y="22" class="tag" fill="#a78bfa">CONTROL PLANE</text>
+      <text x="12" y="42" class="node-title">Primary European VPN</text>
+      <text x="12" y="60" class="code" fill="#c4b5fd">0.0.0.0/0 (Default Gateway)</text>
+      <text x="12" y="78" class="desc">Handles Auth, Policy &amp; Voice</text>
+    </g>
+  </g>
+
+  <!-- ==================== COLUMN 2: TRANSIT & EDGE ==================== -->
+  <g transform="translate(335, 65)">
+    <rect width="250" height="345" fill="#1e293b" stroke="#334155" stroke-width="1" rx="6"/>
+    <text x="15" y="28" class="col-title">Network Transit &amp; Edge</text>
+
+    <!-- DPI Bypass -->
+    <g transform="translate(15, 45)">
+      <rect width="220" height="110" fill="#0f172a" stroke="#334155" stroke-width="1" rx="4"/>
+      <text x="12" y="22" class="tag" fill="#38bdf8">DPI EVASION</text>
+      <text x="12" y="42" class="node-title">Anycast Port 500 / 4500</text>
+      <text x="12" y="60" class="desc">Exempt from ISP DPI throttling</text>
+      <text x="12" y="78" class="desc">Outer WireGuard Noise IK</text>
+      <text x="12" y="96" class="code" fill="#7dd3fc">73 Edge Endpoints Probed</text>
+    </g>
+
+    <!-- Cloudflare Backbone -->
+    <g transform="translate(15, 175)">
+      <rect width="220" height="150" fill="#0f172a" stroke="#334155" stroke-width="1" rx="4"/>
+      <text x="12" y="22" class="tag" fill="#f59e0b">CLOUDFLARE EDGE</text>
+      <text x="12" y="42" class="node-title">Anycast Edge Node</text>
+      <text x="12" y="62" class="desc">Hop 1 Ingress Termination</text>
+      <text x="12" y="80" class="desc">Direct Subsea Fiber Routing</text>
+      <text x="12" y="98" class="desc">Zero Relay Congestion</text>
+      <text x="12" y="118" class="code" fill="#fbbf24">Direct Wire Latency</text>
+    </g>
+  </g>
+
+  <!-- ==================== COLUMN 3: ROBLOX ==================== -->
+  <g transform="translate(640, 65)">
+    <rect width="250" height="345" fill="#1e293b" stroke="#334155" stroke-width="1" rx="6"/>
+    <text x="15" y="28" class="col-title">Roblox Infrastructure</text>
+
+    <!-- Game Servers -->
+    <g transform="translate(15, 60)">
+      <rect width="220" height="120" fill="#0f172a" stroke="#38bdf8" stroke-width="1" rx="4"/>
+      <text x="12" y="22" class="tag" fill="#38bdf8">GAMEPLAY</text>
+      <text x="12" y="42" class="node-title">RakNet Game Servers</text>
+      <text x="12" y="62" class="code" fill="#7dd3fc">128.116.0.0/17</text>
+      <text x="12" y="80" class="desc">UDP Ports 1024 - 65535</text>
+      <text x="12" y="100" class="node-title" fill="#38bdf8">Direct Low-Latency Ping</text>
+    </g>
+
+    <!-- Auth & Voice -->
+    <g transform="translate(15, 200)">
+      <rect width="220" height="125" fill="#0f172a" stroke="#a78bfa" stroke-width="1" rx="4"/>
+      <text x="12" y="22" class="tag" fill="#a78bfa">CONTROL PLANE</text>
+      <text x="12" y="42" class="node-title">apis.roblox.com &amp; WebRTC</text>
+      <text x="12" y="62" class="desc">Voice Ports 3478, 5349</text>
+      <text x="12" y="80" class="desc">Verified European Egress</text>
+      <text x="12" y="102" class="node-title" fill="#a78bfa">Voice &amp; Chat Unlocked</text>
+    </g>
+  </g>
+
+  <!-- Flow Lines -->
+  <!-- 1. Data: Client -> Transit -->
+  <path d="M 280 220 L 335 150" stroke="#38bdf8" stroke-width="1.5" marker-end="url(#arrData)" fill="none"/>
+
+  <!-- 2. Data: Transit -> Cloudflare -->
+  <path d="M 445 155 L 445 175" stroke="#38bdf8" stroke-width="1.5" marker-end="url(#arrData)" fill="none"/>
+
+  <!-- 3. Data: Cloudflare -> Game Servers -->
+  <path d="M 585 240 L 640 160" stroke="#38bdf8" stroke-width="1.5" marker-end="url(#arrData)" fill="none"/>
+
+  <!-- 4. Control: Client VPN -> Roblox Voice/Auth -->
+  <path d="M 280 340 Q 460 410 640 310" stroke="#a78bfa" stroke-width="1.5" marker-end="url(#arrControl)" fill="none"/>
+</svg>

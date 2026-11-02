@@ -54,9 +54,10 @@ To prevent recursive encapsulation loops:
 
 ### 2.3 Roblox Control-Plane Host Routes (`/32`)
 Roblox API edge servers (`apis.roblox.com`, `auth.roblox.com`, `voice.roblox.com`) often reside on IP addresses within the `128.116.x.x` prefix (e.g. `128.116.5.3`, `128.116.13.3`, `128.116.21.3`).
-- Because `/32` prefix length takes absolute precedence over `/17` in the Windows kernel routing table, WARP-MIN pins these specific edge IPs to the primary/VPN network adapter:
-  ```powershell
-  New-NetRoute -DestinationPrefix "128.116.21.3/32" -InterfaceIndex <PRIMARY_IF> -NextHop <PRIMARY_GW> -RouteMetric 1
+- Because `/32` prefix length takes absolute precedence over `/17` in the Windows kernel routing table (Longest Prefix Match), WARP-MIN pins these specific edge IPs to the primary/VPN network adapter directly via Win32 `CreateIpForwardEntry2` (in `iphlpapi.dll`):
+  ```rust
+  // Direct Win32 FFI execution (<1ms, zero subprocess overhead)
+  CreateIpForwardEntry2(&row);
   ```
 - This ensures HTTPS authentication and GUAC policy checks exit through the European VPN breakout, while RakNet gameplay packets exit through `WARP-Gool`.
 
@@ -67,12 +68,10 @@ Roblox API edge servers (`apis.roblox.com`, `auth.roblox.com`, `voice.roblox.com
 Orphaned routes left behind by crashed or improperly terminated VPN software can break internet connectivity. WARP-MIN enforces atomic cleanup:
 
 1. **Shutdown Signal Interception:** Tokio listens for `tokio::signal::ctrl_c()`. When triggered, graceful teardown is initiated.
-2. **Deterministic Route Deletion:**
+2. **Deterministic Win32 Route Deletion:**
    - Shuts down the Wintun ring session (`session.shutdown()`).
-   - Removes adapter IP bindings via `netsh`.
-   - Deletes all injected `/32` API routes.
-   - Deletes the `128.116.0.0/17` gameplay route.
-   - Deletes the `/32` physical gateway host route for Endpoint A.
+   - Deletes all injected `/32` API routes and the `128.116.0.0/17` gameplay route via native `DeleteIpForwardEntry2`.
+   - Restores the primary network adapter's original `WeakHostSend` and `WeakHostReceive` configuration via `SetIpInterfaceEntry`.
 3. **Rust `Drop` Trait Guard:**
    `WintunDevice` implements `Drop`. If the application panics or exits prematurely, `restore_routing()` is executed automatically. An `AtomicBool` (`cleaned_up`) prevents double-free or redundant route deletions.
 

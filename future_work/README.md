@@ -43,14 +43,14 @@ FUTURE ARCHITECTURE (v2.0):
 
 ## 2. Priority Matrix
 
-| ID | Initiative | Priority | Complexity | Target Milestone | Primary Impact | Dependencies |
+| ID | Initiative | Priority | Complexity | Target Milestone | Primary Impact | Status |
 |:---|:---|:---:|:---:|:---:|:---|:---|
-| **[01](01_STANDALONE_EUROPEAN_HOP2.md)** | **Standalone European Hop 2** | **P0** | High | v1.1.0 | Eliminates external Proton VPN requirement; 100% standalone operation | BoringTun, Cloudflare Reg API |
-| **[02](02_WINDOWS_SYSTEM_TRAY_GUI.md)** | **Windows System Tray GUI & HUD** | **P1** | Medium | v1.2.0 | Eliminates console window; real-time ping monitor & 1-click toggle | `tray-icon`, `muda`, Win32 |
-| **[03](03_RELEASE_PACKAGING_AND_INSTALLER.md)** | **Automated CI/CD & Installer** | **P1** | Medium | v1.2.0 | Zero-setup distribution; embedded driver; signed portable bundle | GitHub Actions, NSIS/Inno |
-| **[04](04_DYNAMIC_WEBRTC_TURN_SNIFFING.md)** | **Dynamic WebRTC / TURN Sniffer** | **P2** | High | v1.3.0 | Unblocks dynamic AWS/LiveKit voice relays outside `128.116.0.0/17` | WinDivert / IP Helper API |
-| **[05](05_STRUCTURED_DIAGNOSTIC_LOGGING.md)** | **Structured Logging & Diagnostics** | **P0** | Low | Immediate | Eliminates silent failures, file logging, error cause chaining | `src/logger.rs`, Win32 Console |
-| **[06](06_LATENCY_SPIKE_MITIGATION_AND_PING_STABILITY.md)** | **Latency Spike & Ping Jitter Mitigation** | **P0** | Medium | v1.0.1 | Eliminates transient ping spikes; pre-emptive rekeying, Wi-Fi scan pause, QoS | `src/tunnel.rs`, `wlanapi.dll` |
+| **[01](01_STANDALONE_EUROPEAN_HOP2.md)** | **Standalone European Hop 2** | **P0** | High | Planned (Future) | Eliminates external Proton VPN requirement; 100% standalone operation | Planned |
+| **[02](02_WINDOWS_SYSTEM_TRAY_GUI.md)** | **Windows System Tray GUI & HUD** | **P2** | Medium | Postponed | Lightweight CLI binary prioritized; desktop tray optional | Deferred |
+| **[03](03_RELEASE_PACKAGING_AND_INSTALLER.md)** | **Automated CI/CD & Installer** | **P1** | Medium | v1.2.0 | Automated CI workflow, signed portable bundle | In Progress |
+| **[04](04_DYNAMIC_WEBRTC_TURN_SNIFFING.md)** | **Dynamic WebRTC / TURN Sniffer** | **P2** | High | v1.3.0 | Unblocks dynamic AWS/LiveKit voice relays outside `128.116.0.0/17` | Planned |
+| **[05](05_STRUCTURED_DIAGNOSTIC_LOGGING.md)** | **Structured Logging & Diagnostics** | **P0** | Low | v1.1.0 | Dual-sink structured logging, 10 MB rolling file rotation, error chaining | Completed |
+| **[06](06_LATENCY_SPIKE_MITIGATION_AND_PING_STABILITY.md)** | **Latency Spike & Ping Jitter Mitigation** | **P0** | Medium | v1.1.0 | RFC 1624 MSS clamping, FIFO SNAT eviction, Wi-Fi scan pause | Completed |
 
 ---
 

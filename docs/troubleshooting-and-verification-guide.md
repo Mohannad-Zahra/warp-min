@@ -72,7 +72,7 @@ To validate the security, integrity, and performance of WARP-MIN, every build sh
      ```powershell
      .\target\release\warp-min.exe --tun
      ```
-  4. Launch Roblox. WARP-MIN automatically updates `appStorage.json` to `"ExperienceChatAvailability": "available"`, and the European VPN ensures live wire queries confirm the policy.
+  4. Launch Roblox. *(Optional: pass `--patch-storage` if you wish to unlock cached local policies in `appStorage.json`; a safety `.bak` backup is automatically created).* The European VPN ensures live wire queries confirm the policy.
 
 ---
 
