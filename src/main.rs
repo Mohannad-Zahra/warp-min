@@ -7,6 +7,9 @@ mod tun;
 mod tunnel;
 pub mod wfp;
 
+#[cfg(test)]
+mod test;
+
 use clap::Parser;
 use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
 use std::sync::{Arc, Mutex};
@@ -17,62 +20,66 @@ use tunnel::{DEFAULT_ENDPOINT_A, DEFAULT_ENDPOINT_B, DualHopTunnel};
 
 #[derive(Parser, Debug)]
 #[command(author, version, about = "Minimal Low-Latency WARP-in-WARP Client for Windows", long_about = None)]
-struct Args {
+pub(crate) struct Args {
     /// Enable Wintun adapter mode (named 'WARP-Gool') with split-tunneling (Default)
     #[arg(long)]
-    tun: bool,
+    pub(crate) tun: bool,
 
     /// Enable SOCKS5 proxy fallback mode (default: 127.0.0.1:8086)
     #[arg(long)]
-    socks: bool,
+    pub(crate) socks: bool,
 
     /// Bind address for SOCKS5 proxy mode
     #[arg(long, default_value = "127.0.0.1:8086")]
-    bind: String,
+    pub(crate) bind: String,
 
     /// Cloudflare outer Anycast endpoint A
     #[arg(long, default_value = DEFAULT_ENDPOINT_A)]
-    endpoint_a: String,
+    pub(crate) endpoint_a: String,
 
     /// Cloudflare inner Anycast endpoint B
     #[arg(long, default_value = DEFAULT_ENDPOINT_B)]
-    endpoint_b: String,
+    pub(crate) endpoint_b: String,
 
     /// Single-hop direct WARP mode (outer tunnel only)
     #[arg(long)]
-    single: bool,
+    pub(crate) single: bool,
 
     /// Re-register Hop 2 identity through SOCKS5 proxy (e.g. 127.0.0.1:8086) to obtain EU/Italian GeoIP
     #[arg(long)]
-    register_hop2: bool,
+    pub(crate) register_hop2: bool,
+
+    /// Opt-in modification of Roblox appStorage.json to unblock chat policies (creates .bak backup)
+    #[arg(long)]
+    pub(crate) patch_storage: bool,
 
     /// Path to persistent diagnostic log file (default: warp-min.log)
     #[arg(long, default_value = "warp-min.log")]
-    log_file: String,
+    pub(crate) log_file: String,
 
     /// Disable writing persistent log file to disk
     #[arg(long)]
-    no_log_file: bool,
+    pub(crate) no_log_file: bool,
 
     /// Structured logging level (debug, info, warn, error)
     #[arg(long, default_value = "info")]
-    log_level: logger::LogLevel,
+    pub(crate) log_level: logger::LogLevel,
 
     /// Run automated end-to-end diagnostic suite (validates launcher authentication, Hop 1/2 handshakes, Wintun routing, and synthetic UDP injection)
     #[arg(long)]
-    diagnose: bool,
+    pub(crate) diagnose: bool,
 
     /// Enable individual packet flow tracing (RakNet, STUN/Voice, Control) with millisecond timestamps
     #[arg(long)]
-    log_packets: bool,
+    pub(crate) log_packets: bool,
 
     /// Enable verbose / debug logging
     #[arg(short, long)]
-    verbose: bool,
+    pub(crate) verbose: bool,
 
     /// Internal flag passed when elevated via UAC to prevent loops
     #[arg(long, hide = true)]
-    elevated: bool,
+    pub(crate) elevated: bool,
 }
 
 #[tokio::main]
@@ -140,8 +147,8 @@ async fn run(args: Args) -> Result<(), Box<dyn std::error::Error + Send + Sync>>
         return run_diagnostics(&args).await;
     }
 
-    // Ensure write permissions for appStorage.json are permanently restored so Roblox's LocalStorageManager does not throw access denied errors.
-    ensure_roblox_app_storage_writable();
+    // Check or optionally patch Roblox appStorage.json if opted in
+    let _ = check_roblox_app_storage(args.patch_storage);
 
     // Auto-Elevation check for TUN mode:
     // Wintun driver and network route configuration require Windows Administrator privileges.
@@ -225,7 +232,7 @@ async fn run(args: Args) -> Result<(), Box<dyn std::error::Error + Send + Sync>>
     Ok(())
 }
 
-fn create_optimized_udp_socket()
+pub(crate) fn create_optimized_udp_socket()
 -> Result<std::net::UdpSocket, Box<dyn std::error::Error + Send + Sync>> {
     use socket2::{Domain, Protocol, Socket, Type};
     let socket = Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::UDP))?;
@@ -260,7 +267,7 @@ fn create_optimized_udp_socket()
     Ok(socket.into())
 }
 
-fn get_anycast_candidates() -> Vec<SocketAddr> {
+pub(crate) fn get_anycast_candidates() -> Vec<SocketAddr> {
     let mut addrs = Vec::new();
 
     // Port 500 endpoints prioritized first to bypass Egyptian ISP DPI blocking on ports 1701 & 2408
@@ -321,7 +328,7 @@ fn get_anycast_candidates() -> Vec<SocketAddr> {
     addrs
 }
 
-fn get_hop2_candidates() -> Vec<SocketAddrV4> {
+pub(crate) fn get_hop2_candidates() -> Vec<SocketAddrV4> {
     vec![
         SocketAddrV4::new(Ipv4Addr::new(188, 114, 97, 3), 2408),
         SocketAddrV4::new(Ipv4Addr::new(188, 114, 97, 1), 2408),
@@ -336,7 +343,7 @@ fn get_hop2_candidates() -> Vec<SocketAddrV4> {
     ]
 }
 
-fn align_hop2_endpoint(endpoint_a: SocketAddr) -> SocketAddrV4 {
+pub(crate) fn align_hop2_endpoint(endpoint_a: SocketAddr) -> SocketAddrV4 {
     let ip = match endpoint_a.ip() {
         std::net::IpAddr::V4(v4) => v4,
         _ => Ipv4Addr::new(162, 159, 192, 1),
@@ -369,8 +376,9 @@ async fn establish_hop1(
         vec![dual_tunnel.endpoint_a]
     };
 
-    let (priority_candidates, fallback_candidates): (Vec<_>, Vec<_>) =
-        candidates.into_iter().partition(|c| c.port() == 500 || c.port() == 4500);
+    let (priority_candidates, fallback_candidates): (Vec<_>, Vec<_>) = candidates
+        .into_iter()
+        .partition(|c| c.port() == 500 || c.port() == 4500);
 
     log_info!(
         "[*] Probing {} candidate Anycast endpoints (prioritizing Ports 500 & 4500 for DPI evasion)...",
@@ -426,7 +434,8 @@ async fn establish_hop1(
                     let rtt_ms = start_time.elapsed().as_millis();
                     log_info!(
                         "[+] Hop 1 Handshake established with {} (RTT: {}ms)!",
-                        sender, rtt_ms
+                        sender,
+                        rtt_ms
                     );
                     udp.connect(sender).await?;
                     for p in outcome.to_network {
@@ -594,17 +603,13 @@ async fn run_diagnostics(args: &Args) -> Result<(), Box<dyn std::error::Error + 
     let mut egress_loc = String::from("N/A");
     let mut egress_ip = String::from("N/A");
 
-    let curl_res = tokio::task::spawn_blocking(|| {
-        std::process::Command::new("curl.exe")
-            .args(["-s", "--connect-timeout", "4", "https://1.1.1.1/cdn-cgi/trace"])
-            .output()
-    })
-    .await;
-
-    if let Ok(Ok(output)) = curl_res
-        && output.status.success()
+    let http_client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(4))
+        .build();
+    if let Ok(c) = http_client
+        && let Ok(resp) = c.get("https://1.1.1.1/cdn-cgi/trace").send().await
+        && let Ok(trace) = resp.text().await
     {
-        let trace = String::from_utf8_lossy(&output.stdout);
         for line in trace.lines() {
             if let Some(val) = line.strip_prefix("colo=") {
                 egress_pop = val.to_string();
@@ -616,7 +621,7 @@ async fn run_diagnostics(args: &Args) -> Result<(), Box<dyn std::error::Error + 
                 egress_ip = val.to_string();
             }
         }
-        if egress_loc != "EG" {
+        if egress_loc != "EG" && egress_loc != "N/A" {
             egress_ok = true;
             log_info!(
                 "  [+] Control-plane egress verified: PoP={}, Country={}, IP={}",
@@ -626,7 +631,7 @@ async fn run_diagnostics(args: &Args) -> Result<(), Box<dyn std::error::Error + 
             );
         } else {
             log_warn!(
-                "  [!] Egress mapped to Egypt (EG): PoP={}, Country={}, IP={}",
+                "  [!] Egress mapped to EG: PoP={}, Country={}, IP={}",
                 egress_pop,
                 egress_loc,
                 egress_ip
@@ -635,12 +640,34 @@ async fn run_diagnostics(args: &Args) -> Result<(), Box<dyn std::error::Error + 
     }
 
     if !egress_ok {
-        log_warn!("  [!] Note: Non-EG egress not detected. Ensure ProtonVPN is active for European chat unlock.");
+        log_warn!(
+            "  [!] Note: Non-EG egress not detected. Ensure ProtonVPN is active for European chat unlock."
+        );
     }
 
-    // Check Roblox LocalStorage write permissions and cached policy
-    ensure_roblox_app_storage_writable();
-    log_info!("  [+] Verified Roblox appStorage.json is writable and chat policy is unblocked.");
+    // Check Roblox LocalStorage permissions and report honestly
+    match check_roblox_app_storage(args.patch_storage) {
+        Ok(status) => {
+            if status.exists {
+                if status.patched {
+                    log_info!(
+                        "  [+] Roblox appStorage.json verified writable and policy patched (backup created)."
+                    );
+                } else {
+                    log_info!(
+                        "  [+] Roblox appStorage.json exists and writable (policy patching opt-in via --patch-storage)."
+                    );
+                }
+            } else {
+                log_info!(
+                    "  [*] Roblox appStorage.json not found (will be created on first Roblox launch)."
+                );
+            }
+        }
+        Err(e) => {
+            log_warn!("  [!] Could not verify Roblox appStorage.json: {}", e);
+        }
+    }
 
     // -------------------------------------------------------------
     // STAGE 2: WireGuard Tunnel Handshakes (Hop 1 & Hop 2)
@@ -712,7 +739,10 @@ async fn run_diagnostics(args: &Args) -> Result<(), Box<dyn std::error::Error + 
     let mut route_gameplay_ok = false;
     match tun::get_best_route_interface(test_game_server) {
         Ok((if_idx, src_ip)) => {
-            if if_idx == wintun_if_index && src_ip == device_ip && src_ip == Ipv4Addr::new(172, 16, 0, 2) {
+            if if_idx == wintun_if_index
+                && src_ip == device_ip
+                && src_ip == Ipv4Addr::new(172, 16, 0, 2)
+            {
                 log_info!(
                     "  [+] Kernel Route Verified: {} routes via WARP-Gool (Source IP: 172.16.0.2)",
                     test_game_server
@@ -799,7 +829,11 @@ async fn run_diagnostics(args: &Args) -> Result<(), Box<dyn std::error::Error + 
             let res_unbound = test_socket_unbound.send_to(synthetic_payload, probe_target);
             if send_attempts == 0 {
                 match res_unbound {
-                    Ok(n) => log_info!("  [+] Probe sent via unbound socket ({} bytes to {})", n, probe_target),
+                    Ok(n) => log_info!(
+                        "  [+] Probe sent via unbound socket ({} bytes to {})",
+                        n,
+                        probe_target
+                    ),
                     Err(ref e) => log_error!("  [-] Failed to send via unbound socket: {}", e),
                 }
             }
@@ -883,9 +917,11 @@ async fn run_diagnostics(args: &Args) -> Result<(), Box<dyn std::error::Error + 
 
         let mut inner_buf = [0u8; 2048];
         let mut outer_buf = [0u8; 2048];
-        if let Some(encap) =
-            dual_tunnel.encapsulate_user_packet(&mut intercepted_pkt, &mut inner_buf, &mut outer_buf)
-        {
+        if let Some(encap) = dual_tunnel.encapsulate_user_packet(
+            &mut intercepted_pkt,
+            &mut inner_buf,
+            &mut outer_buf,
+        ) {
             encap_ok = true;
             let post_snat_src = Ipv4Addr::new(
                 intercepted_pkt[12],
@@ -969,9 +1005,11 @@ async fn run_diagnostics(args: &Args) -> Result<(), Box<dyn std::error::Error + 
     );
     println!("--------------------------------------------------------------------------------");
     if all_passed && interception_ok {
-        println!("  >>> VERDICT: ALL SYSTEMS OPERATIONAL. Zero-packet condition RESOLVED.");
-        println!("  >>> Roblox launcher and gameplay will connect seamlessly without Error 279.");
-        log_info!("[+] ALL 6 DIAGNOSTIC CHECKS PASSED.");
+        println!(
+            "  >>> VERDICT: SYNTHETIC TESTS PASSED. Kernel routing, adapter FFI, and tunnel handshakes verified."
+        );
+        println!("  >>> Ready for Roblox client traffic.");
+        log_info!("[+] ALL DIAGNOSTIC CHECKS PASSED.");
     } else {
         println!("  >>> VERDICT: ISSUES DETECTED. Please review the failed items above.");
     }
@@ -997,7 +1035,11 @@ fn print_acceleration_dashboard(edge_endpoint: &str, colo: &str, loc: &str, is_t
     log_info!("  Client Mode        : {}", mode_str);
     log_info!("  Edge Endpoint      : {} (Active)", edge_endpoint);
     log_info!("  Acceleration Target: 128.116.0.0/17 RakNet UDP");
-    log_info!("  Control-Plane      : European egress verified (PoP: {}, Country: {}) / chat unlocked", colo, loc);
+    log_info!(
+        "  Control-Plane      : European egress verified (PoP: {}, Country: {}) / chat unlocked",
+        colo,
+        loc
+    );
     log_info!("--------------------------------------------------------------------------------");
     log_info!("  >>> Open Roblox and join any game!");
     log_info!("  >>> Press Shift+F3 in-game for live ping HUD.");
@@ -1011,7 +1053,7 @@ async fn verify_egress(
     wintun_ip: Option<String>,
 ) {
     tokio::time::sleep(Duration::from_millis(1500)).await;
-    log_info!("[*] Verifying European breakout via https://1.1.1.1/cdn-cgi/trace...");
+    log_info!("[*] Verifying breakout via https://1.1.1.1/cdn-cgi/trace...");
 
     let mut attempts = 0;
     const MAX_ATTEMPTS: usize = 3;
@@ -1019,138 +1061,106 @@ async fn verify_egress(
     while attempts < MAX_ATTEMPTS {
         attempts += 1;
 
-        let proxy_opt = proxy_addr.clone();
-        let if_ip_opt = wintun_ip.clone();
-        let curl_output = tokio::task::spawn_blocking(move || {
-            let mut cmd = std::process::Command::new("curl.exe");
-            cmd.args(["-s", "--connect-timeout", "4"]);
-            if let Some(ref proxy) = proxy_opt {
-                cmd.args(["--socks5-hostname", proxy]);
-            } else if let Some(ref if_ip) = if_ip_opt {
-                cmd.args(["--interface", if_ip]);
+        let mut builder = reqwest::Client::builder().timeout(Duration::from_secs(4));
+
+        if let Some(ref proxy) = proxy_addr {
+            if let Ok(p) = reqwest::Proxy::all(format!("socks5h://{}", proxy)) {
+                builder = builder.proxy(p);
             }
-            cmd.arg("https://1.1.1.1/cdn-cgi/trace");
-            cmd.output()
-        })
-        .await;
+        } else if let Some(ref if_ip) = wintun_ip
+            && let Ok(ip) = if_ip.parse::<std::net::IpAddr>()
+        {
+            builder = builder.local_address(Some(ip));
+        }
 
-        match curl_output {
-            Ok(Ok(output)) if output.status.success() => {
-                let text = String::from_utf8_lossy(&output.stdout);
-                let mut colo = "unknown";
-                let mut loc = "unknown";
-                let mut warp = "off";
-                let mut ip = "unknown";
-                for line in text.lines() {
-                    if let Some(val) = line.strip_prefix("colo=") {
-                        colo = val;
-                    }
-                    if let Some(val) = line.strip_prefix("loc=") {
-                        loc = val;
-                    }
-                    if let Some(val) = line.strip_prefix("warp=") {
-                        warp = val;
-                    }
-                    if let Some(val) = line.strip_prefix("ip=") {
-                        ip = val;
-                    }
-                }
+        let client = match builder.build() {
+            Ok(c) => c,
+            Err(e) => {
+                log_warn!("[!] Failed creating HTTP client: {}", e);
+                tokio::time::sleep(Duration::from_millis(1000)).await;
+                continue;
+            }
+        };
 
-                if loc == "EG" {
-                    log_warn!(
-                        "[!] WARNING: Egress mapped to EG (Egyptian pool): PoP={}, Country={}, IP={}, WARP={}",
-                        colo, loc, ip, warp
-                    );
-                    log_info!(
-                        "[*] Egyptian egress detected - checking live Roblox policy over wire..."
-                    );
-
-                    // Live query to apis.roblox.com to verify whether chat policy is unlocked
-                    let proxy_opt_roblox = proxy_addr.clone();
-                    let if_ip_roblox = wintun_ip.clone();
-                    let roblox_res = tokio::task::spawn_blocking(move || {
-                        let mut cmd = std::process::Command::new("curl.exe");
-                        cmd.args(["-s", "--connect-timeout", "4"]);
-                        if let Some(ref proxy) = proxy_opt_roblox {
-                            cmd.args(["--socks5-hostname", proxy]);
-                        } else if let Some(ref if_ip) = if_ip_roblox {
-                            cmd.args(["--interface", if_ip]);
+        match client.get("https://1.1.1.1/cdn-cgi/trace").send().await {
+            Ok(resp) if resp.status().is_success() => {
+                if let Ok(text) = resp.text().await {
+                    let mut colo = "unknown";
+                    let mut loc = "unknown";
+                    let mut warp = "off";
+                    let mut ip = "unknown";
+                    for line in text.lines() {
+                        if let Some(val) = line.strip_prefix("colo=") {
+                            colo = val;
                         }
-                        cmd.arg("https://apis.roblox.com/universal-app-configuration/v1/behaviors/app-policy/content");
-                        cmd.output()
-                    }).await;
-
-                    if let Ok(Ok(r_out)) = roblox_res {
-                        let r_text = String::from_utf8_lossy(&r_out.stdout);
-                        if r_text.contains("\"ExperienceChatAvailability\":\"available\"") {
-                            log_info!(
-                                "[+] Roblox chat policy is unlocked over the wire (ExperienceChatAvailability: available)!"
-                            );
-                            log_info!(
-                                "[+] Tunnel egress verified successfully: PoP={}, Country={}, IP={}, WARP={}",
-                                colo, loc, ip, warp
-                            );
-                            print_acceleration_dashboard(&edge_endpoint, colo, loc, proxy_addr.is_none());
-                            return;
-                        } else if r_text.contains("\"ExperienceChatAvailability\":\"regionLocked\"")
-                        {
-                            log_warn!(
-                                "[!] Note: Wire response returned regionLocked. Local appStorage.json remains unlocked."
-                            );
+                        if let Some(val) = line.strip_prefix("loc=") {
+                            loc = val;
+                        }
+                        if let Some(val) = line.strip_prefix("warp=") {
+                            warp = val;
+                        }
+                        if let Some(val) = line.strip_prefix("ip=") {
+                            ip = val;
                         }
                     }
 
-                    if warp == "on" {
-                        log_info!(
-                            "[+] Dual-Hop Tunnel egress verified successfully: PoP={}, Country={}, IP={}, WARP={}",
-                            colo, loc, ip, warp
-                        );
-                        print_acceleration_dashboard(&edge_endpoint, colo, loc, proxy_addr.is_none());
-                        return;
-                    }
-
-                    if attempts < MAX_ATTEMPTS {
-                        log_info!(
-                            "[*] Retrying egress verification (attempt {}/{})...",
-                            attempts + 1,
-                            MAX_ATTEMPTS
-                        );
-                        tokio::time::sleep(Duration::from_millis(2000)).await;
-                        continue;
-                    } else {
+                    if loc == "EG" {
                         log_warn!(
-                            "[!] Egress verification completed: PoP={}, Country={}, IP={}",
-                            colo, loc, ip
+                            "[!] Note: Egress mapped to loc=EG: PoP={}, Country={}, IP={}, WARP={}",
+                            colo,
+                            loc,
+                            ip,
+                            warp
                         );
-                        print_acceleration_dashboard(&edge_endpoint, colo, loc, proxy_addr.is_none());
-                        return;
+                        log_info!("[*] Checking live Roblox policy over wire...");
+
+                        let roblox_res = client
+                            .get("https://apis.roblox.com/universal-app-configuration/v1/behaviors/app-policy/content")
+                            .send()
+                            .await;
+
+                        if let Ok(r_resp) = roblox_res
+                            && let Ok(r_text) = r_resp.text().await
+                        {
+                            if r_text.contains("\"ExperienceChatAvailability\":\"available\"") {
+                                log_info!(
+                                    "[+] Roblox chat policy is unlocked over the wire (ExperienceChatAvailability: available)!"
+                                );
+                                log_info!(
+                                    "[+] Tunnel egress verified: PoP={}, Country={}, IP={}, WARP={}",
+                                    colo,
+                                    loc,
+                                    ip,
+                                    warp
+                                );
+                            } else {
+                                log_warn!(
+                                    "[!] In-game chat may be restricted by Roblox under current IP (Country: {}). Voice/chat unlock requires non-EG egress (e.g. ProtonVPN split-route).",
+                                    loc
+                                );
+                            }
+                        }
+                    } else {
+                        log_info!(
+                            "[+] Non-EG breakout confirmed: PoP={}, Country={}, IP={}, WARP={}",
+                            colo,
+                            loc,
+                            ip,
+                            warp
+                        );
                     }
-                } else {
-                    log_info!(
-                        "[+] Non-EG Egress verified successfully: PoP={}, Country={}, IP={}, WARP={}",
-                        colo, loc, ip, warp
-                    );
-                    log_info!("[+] European breakout confirmed - Roblox chat policy unlocked!");
+
                     print_acceleration_dashboard(&edge_endpoint, colo, loc, proxy_addr.is_none());
                     return;
                 }
             }
-            _ => {
-                if attempts < MAX_ATTEMPTS {
-                    log_warn!(
-                        "[!] Direct egress probe pending or timed out. Retrying ({}/{})...",
-                        attempts + 1,
-                        MAX_ATTEMPTS
-                    );
-                    tokio::time::sleep(Duration::from_millis(1500)).await;
-                    continue;
-                } else {
-                    log_error!("[!] Egress probe failed after {} attempts.", MAX_ATTEMPTS);
-                    print_acceleration_dashboard(&edge_endpoint, "N/A", "N/A", proxy_addr.is_none());
-                }
+            Ok(_) | Err(_) => {
+                tokio::time::sleep(Duration::from_millis(1000)).await;
             }
         }
     }
+
+    log_warn!("[!] Egress verification probe timed out after 3 attempts. Tunnel is running.");
 }
 
 pub fn update_guac_policy_in_value(root: &mut serde_json::Value) -> bool {
@@ -1252,36 +1262,80 @@ pub fn ensure_file_writable(path: &std::path::Path) -> std::io::Result<bool> {
 
 /// Permanently restore write permissions for Roblox's appStorage.json so Roblox's
 /// LocalStorageManager does not throw access denied errors.
-pub fn ensure_roblox_app_storage_writable() {
-    if let Ok(local_app_data) = std::env::var("LOCALAPPDATA") {
-        let app_storage_path = std::path::PathBuf::from(local_app_data)
-            .join("Roblox")
-            .join("LocalStorage")
-            .join("appStorage.json");
-        match ensure_file_writable(&app_storage_path) {
-            Ok(true) => log_info!(
-                "[+] Restored write permissions on appStorage.json (LocalStorageManager unblocked)!"
-            ),
-            Ok(false) => {}
-            Err(e) => log_warn!(
-                "[!] Note restoring appStorage.json write permissions: {}",
-                e
-            ),
+#[derive(Debug)]
+pub struct StorageStatus {
+    pub exists: bool,
+    pub writable: bool,
+    pub backed_up: bool,
+    pub patched: bool,
+}
+
+pub fn check_roblox_app_storage(patch_storage: bool) -> Result<StorageStatus, String> {
+    let local_app_data = match std::env::var("LOCALAPPDATA") {
+        Ok(v) => v,
+        Err(_) => return Err("LOCALAPPDATA environment variable not set".to_string()),
+    };
+    let app_storage_path = std::path::PathBuf::from(local_app_data)
+        .join("Roblox")
+        .join("LocalStorage")
+        .join("appStorage.json");
+
+    if !app_storage_path.exists() {
+        return Ok(StorageStatus {
+            exists: false,
+            writable: false,
+            backed_up: false,
+            patched: false,
+        });
+    }
+
+    let mut backed_up = false;
+    let mut patched = false;
+
+    let writable = match ensure_file_writable(&app_storage_path) {
+        Ok(_) => true,
+        Err(e) => {
+            log_warn!("[!] Note checking appStorage.json permissions: {}", e);
+            false
+        }
+    };
+
+    if patch_storage && writable {
+        let bak_path = app_storage_path.with_extension("json.bak");
+        if !bak_path.exists() {
+            if let Err(e) = std::fs::copy(&app_storage_path, &bak_path) {
+                log_warn!("[!] Failed to create appStorage.json.bak backup: {}", e);
+            } else {
+                backed_up = true;
+                log_info!("[+] Created safety backup at {}", bak_path.display());
+            }
+        } else {
+            backed_up = true;
         }
 
-        // Also ensure any cached policy fields are unlocked to 'available' while keeping file writable
-        if app_storage_path.exists()
-            && let Ok(content) = std::fs::read_to_string(&app_storage_path)
-            && let Ok(mut val) = serde_json::from_str::<serde_json::Value>(&content)
+        if let Ok(storage_content) = std::fs::read_to_string(&app_storage_path)
+            && let Ok(mut val) = serde_json::from_str::<serde_json::Value>(&storage_content)
             && update_guac_policy_in_value(&mut val)
             && let Ok(new_content) = serde_json::to_string(&val)
         {
-            let _ = std::fs::write(&app_storage_path, new_content);
-            log_info!(
-                "[+] Unlocked cached Roblox app-policy in appStorage.json (file remains writable)!"
-            );
+            if let Err(e) = std::fs::write(&app_storage_path, new_content) {
+                log_warn!(
+                    "[!] Failed writing updated policy to appStorage.json: {}",
+                    e
+                );
+            } else {
+                patched = true;
+                log_info!("[+] Opt-in: Unlocked cached Roblox app-policy in appStorage.json!");
+            }
         }
     }
+
+    Ok(StorageStatus {
+        exists: true,
+        writable,
+        backed_up,
+        patched,
+    })
 }
 
 async fn run_socks_mode(
@@ -1289,8 +1343,8 @@ async fn run_socks_mode(
     udp: Arc<UdpSocket>,
     args: &Args,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let (to_tunnel_tx, mut to_tunnel_rx) = mpsc::unbounded_channel::<Vec<u8>>();
-    let (from_tunnel_tx, from_tunnel_rx) = mpsc::unbounded_channel::<Vec<u8>>();
+    let (to_tunnel_tx, mut to_tunnel_rx) = mpsc::channel::<Vec<u8>>(2048);
+    let (from_tunnel_tx, from_tunnel_rx) = mpsc::channel::<Vec<u8>>(2048);
 
     let local_ip = {
         let lock = tunnel.lock().unwrap();
@@ -1352,7 +1406,7 @@ async fn run_socks_mode(
                         let _ = udp_inbound.send(&net_pkt).await;
                     }
                     for user_pkt in outcome.to_user {
-                        let _ = from_tunnel_tx.send(user_pkt);
+                        let _ = from_tunnel_tx.send(user_pkt).await;
                     }
                 }
                 Ok(_) => {}
@@ -1449,33 +1503,6 @@ pub fn verify_tunnel_handshake_health(tunnel: &DualHopTunnel) -> bool {
     hop1_ok && hop2_ok
 }
 
-/// Classifies the physical region of a Roblox game server IP in 128.116.0.0/17.
-/// Provides instant diagnostic feedback in telemetry so players immediately know
-/// if high latency is caused by connecting to a US server (~130ms) vs an EU server (~40ms).
-pub fn classify_roblox_datacenter(ip: &str) -> &'static str {
-    if let Ok(ipv4) = ip.parse::<Ipv4Addr>() {
-        let octets = ipv4.octets();
-        if octets[0] == 128 && octets[1] == 116 {
-            let third = octets[2];
-            if third < 32 {
-                "US East (Ashburn, VA) / Global Anycast [Expected Ping: ~125-145ms across transatlantic fiber]"
-            } else if third < 64 {
-                "Europe (Frankfurt / London) [Expected Ping: ~38-48ms direct subsea wire latency]"
-            } else if third < 96 {
-                "US Central (Chicago / Dallas) [Expected Ping: ~140-165ms]"
-            } else if third < 128 {
-                "US West (San Mateo / LA) [Expected Ping: ~190-230ms]"
-            } else {
-                "Roblox Edge Network"
-            }
-        } else {
-            "External Server"
-        }
-    } else {
-        "Unknown Datacenter"
-    }
-}
-
 async fn run_tun_mode(
     tunnel: Arc<Mutex<DualHopTunnel>>,
     udp: Arc<UdpSocket>,
@@ -1541,8 +1568,13 @@ async fn run_tun_mode(
     {
         let lock = tunnel.lock().unwrap();
         if !verify_tunnel_handshake_health(&lock) {
-            log_error!("[-] Pre-flight tunnel health check failed: WireGuard handshakes are unconfirmed.");
-            return Err("Cannot activate TUN mode: WireGuard tunnel is not established with Cloudflare.".into());
+            log_error!(
+                "[-] Pre-flight tunnel health check failed: WireGuard handshakes are unconfirmed."
+            );
+            return Err(
+                "Cannot activate TUN mode: WireGuard tunnel is not established with Cloudflare."
+                    .into(),
+            );
         }
     }
 
@@ -1563,7 +1595,7 @@ async fn run_tun_mode(
     let raknet_rx_bytes = Arc::new(std::sync::atomic::AtomicU64::new(0));
     let last_game_server = Arc::new(Mutex::new(None::<String>));
 
-    let (to_tunnel_tx, mut to_tunnel_rx) = mpsc::unbounded_channel::<Vec<u8>>();
+    let (to_tunnel_tx, mut to_tunnel_rx) = mpsc::channel::<Vec<u8>>(2048);
 
     // Read loop from Wintun
     std::thread::spawn(move || {
@@ -1572,7 +1604,7 @@ async fn run_tun_mode(
             match session_read.receive_blocking() {
                 Ok(packet) => {
                     let bytes = packet.bytes().to_vec();
-                    if to_tunnel_tx.send(bytes).is_err() {
+                    if to_tunnel_tx.blocking_send(bytes).is_err() {
                         log_warn!("[-] Wintun read channel closed (shutting down).");
                         break;
                     }
@@ -1617,10 +1649,14 @@ async fn run_tun_mode(
                 }
             } else if tunnel::is_roblox_gameplay_udp(&user_pkt) {
                 let pkt_len = user_pkt.len() as u64;
-                let tx_cnt = raknet_tx_packets_out.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+                let tx_cnt =
+                    raknet_tx_packets_out.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
                 raknet_tx_bytes_out.fetch_add(pkt_len, std::sync::atomic::Ordering::Relaxed);
 
-                let dst_ip = format!("{}.{}.{}.{}", user_pkt[16], user_pkt[17], user_pkt[18], user_pkt[19]);
+                let dst_ip = format!(
+                    "{}.{}.{}.{}",
+                    user_pkt[16], user_pkt[17], user_pkt[18], user_pkt[19]
+                );
                 let dst_port = if user_pkt.len() >= 24 {
                     let ihl = (user_pkt[0] & 0x0f) as usize * 4;
                     u16::from_be_bytes([user_pkt[ihl + 2], user_pkt[ihl + 3]])
@@ -1631,15 +1667,18 @@ async fn run_tun_mode(
                 *last_game_server_out.lock().unwrap() = Some(srv.clone());
 
                 if tx_cnt == 1 {
-                    let dc_info = classify_roblox_datacenter(&dst_ip);
                     log_info!(
-                        "[+] [ROBLOX-SESSION] Connecting to game server {} | Datacenter: {}",
-                        srv,
-                        dc_info
+                        "[+] [ROBLOX-SESSION] Connecting to Roblox game server {} (CIDR 128.116.0.0/17)",
+                        srv
                     );
                 }
 
-                if tx_cnt <= 5 || tx_cnt == 10 || tx_cnt == 25 || tx_cnt == 50 || tx_cnt.is_multiple_of(100) {
+                if tx_cnt <= 5
+                    || tx_cnt == 10
+                    || tx_cnt == 25
+                    || tx_cnt == 50
+                    || tx_cnt.is_multiple_of(100)
+                {
                     log_info!(
                         "[+] [ROBLOX-RAKNET] Unified Hop 2 egress for UDP gameplay packet to {} (total: {})",
                         srv,
@@ -1696,8 +1735,11 @@ async fn run_tun_mode(
 
                         if tunnel::is_roblox_gameplay_udp_inbound(&user_pkt) {
                             let pkt_len = user_pkt.len() as u64;
-                            let rx_cnt = raknet_rx_packets_in.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
-                            raknet_rx_bytes_in.fetch_add(pkt_len, std::sync::atomic::Ordering::Relaxed);
+                            let rx_cnt = raknet_rx_packets_in
+                                .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+                                + 1;
+                            raknet_rx_bytes_in
+                                .fetch_add(pkt_len, std::sync::atomic::Ordering::Relaxed);
 
                             let ihl = (user_pkt[0] & 0x0f) as usize * 4;
                             let src_port = if user_pkt.len() >= ihl + 4 {
@@ -1705,9 +1747,17 @@ async fn run_tun_mode(
                             } else {
                                 0
                             };
-                            let src_ip = format!("{}.{}.{}.{}", user_pkt[12], user_pkt[13], user_pkt[14], user_pkt[15]);
+                            let src_ip = format!(
+                                "{}.{}.{}.{}",
+                                user_pkt[12], user_pkt[13], user_pkt[14], user_pkt[15]
+                            );
 
-                            if rx_cnt <= 5 || rx_cnt == 10 || rx_cnt == 25 || rx_cnt == 50 || rx_cnt.is_multiple_of(100) {
+                            if rx_cnt <= 5
+                                || rx_cnt == 10
+                                || rx_cnt == 25
+                                || rx_cnt == 50
+                                || rx_cnt.is_multiple_of(100)
+                            {
                                 log_info!(
                                     "[+] [ROBLOX-RAKNET] Unified Hop 2 ingress for UDP gameplay packet from {}:{} (total: {})",
                                     src_ip,
@@ -1729,7 +1779,7 @@ async fn run_tun_mode(
                                 }
                                 Err(_) => {
                                     if attempt < 2 {
-                                         std::thread::yield_now();
+                                        std::thread::yield_now();
                                     }
                                 }
                             }
@@ -1783,14 +1833,12 @@ async fn run_tun_mode(
 
     let event_waiter = async move {
         if let Some(h) = shutdown_handle {
-            tokio::task::spawn_blocking(move || {
-                unsafe {
-                    windows_sys::Win32::System::Threading::WaitForSingleObject(
-                        h,
-                        windows_sys::Win32::System::Threading::INFINITE,
-                    );
-                    windows_sys::Win32::Foundation::CloseHandle(h);
-                }
+            tokio::task::spawn_blocking(move || unsafe {
+                windows_sys::Win32::System::Threading::WaitForSingleObject(
+                    h,
+                    windows_sys::Win32::System::Threading::INFINITE,
+                );
+                windows_sys::Win32::Foundation::CloseHandle(h);
             })
             .await
             .ok();
@@ -1832,413 +1880,28 @@ async fn run_tun_mode(
     log_info!("================================================================================");
     log_info!("  Session Duration       : {:02}m {:02}s", mins, secs);
     log_info!("  Roblox Game Server     : {}", server_str);
-    log_info!("  Gameplay Packets Sent  : {} ({} B)", sent_pkts, sent_bytes);
-    log_info!("  Gameplay Packets Recv  : {} ({} B)", recv_pkts, recv_bytes);
-    log_info!("  Total RakNet Packets   : {} packets accelerated ({} B)", sent_pkts + recv_pkts, sent_bytes + recv_bytes);
-    log_info!("  Host Routing Status    : Confirmed cleanly restored (128.116.0.0/17 removed, 0 residual routes)");
+    log_info!(
+        "  Gameplay Packets Sent  : {} ({} B)",
+        sent_pkts,
+        sent_bytes
+    );
+    log_info!(
+        "  Gameplay Packets Recv  : {} ({} B)",
+        recv_pkts,
+        recv_bytes
+    );
+    log_info!(
+        "  Total RakNet Packets   : {} packets accelerated ({} B)",
+        sent_pkts + recv_pkts,
+        sent_bytes + recv_bytes
+    );
+    log_info!(
+        "  Host Routing Status    : Confirmed cleanly restored (128.116.0.0/17 removed, 0 residual routes)"
+    );
     log_info!("  Adapter Status         : Wintun interface 'WARP-Gool' closed and unmounted");
     log_info!("================================================================================");
     log_info!("  [✓] Confirmation: All host routing tables were cleanly restored.");
     log_info!("  [+] Thank you for using WARP-MIN. Safe gaming!");
     log_info!("================================================================================");
     Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_args_default_mode_is_tun() {
-        let args = Args::try_parse_from(["warp-min"]).expect("parse default args");
-        let use_tun = !args.socks;
-        assert!(use_tun, "Default mode must be Option B (TUN mode)");
-    }
-
-    #[test]
-    fn test_args_explicit_socks_mode() {
-        let args = Args::try_parse_from(["warp-min", "--socks"]).expect("parse socks args");
-        let use_tun = !args.socks;
-        assert!(!use_tun, "Explicit --socks flag must select SOCKS mode");
-    }
-
-    #[test]
-    fn test_args_explicit_tun_mode() {
-        let args = Args::try_parse_from(["warp-min", "--tun"]).expect("parse tun args");
-        let use_tun = !args.socks;
-        assert!(use_tun, "Explicit --tun flag must select TUN mode");
-    }
-
-    #[test]
-    fn test_args_elevated_flag_parsing() {
-        let args = Args::try_parse_from(["warp-min", "--elevated"]).expect("parse elevated args");
-        assert!(args.elevated, "--elevated flag must be parsed");
-        let use_tun = !args.socks;
-        assert!(use_tun, "Default with --elevated must still be TUN mode");
-    }
-
-    #[test]
-    fn test_args_logging_flags_parsing() {
-        let args = Args::try_parse_from(["warp-min", "--log-file", "test.log", "--verbose"])
-            .expect("parse logging args");
-        assert_eq!(args.log_file, "test.log");
-        assert!(args.verbose);
-        assert!(!args.no_log_file);
-        assert_eq!(args.log_level, logger::LogLevel::Info);
-        assert!(!args.log_packets);
-
-        let args2 =
-            Args::try_parse_from(["warp-min", "--no-log-file"]).expect("parse no-log-file args");
-        assert!(args2.no_log_file);
-
-        let args3 = Args::try_parse_from(["warp-min", "--log-packets", "--log-level", "debug"])
-            .expect("parse log level and packets");
-        assert!(args3.log_packets);
-        assert_eq!(args3.log_level, logger::LogLevel::Debug);
-    }
-
-    #[test]
-    fn test_unlock_guac_policy_json() {
-        let raw_policy = r#"{"ExperienceChatAvailability":"regionLocked","CanUsePlatformChat":false,"CanUsePlatformChat2":false,"CountryCode":"FR","Username":"Owl_JustABird"}"#;
-        let mut raw_app_storage = serde_json::json!({
-            "Username": "Owl_JustABird",
-            "AppConfiguration": serde_json::to_string(&serde_json::json!({
-                "GUAC:-1:app-policy": raw_policy,
-                "GUAC:600860999:app-policy": raw_policy,
-                "OtherSetting": 123
-            })).unwrap()
-        });
-
-        let modified = update_guac_policy_in_value(&mut raw_app_storage);
-        assert!(modified);
-
-        // Verify chat fields unlocked
-        let app_config_str = raw_app_storage["AppConfiguration"].as_str().unwrap();
-        let app_config: serde_json::Value = serde_json::from_str(app_config_str).unwrap();
-        let p1: serde_json::Value =
-            serde_json::from_str(app_config["GUAC:-1:app-policy"].as_str().unwrap()).unwrap();
-        assert_eq!(p1["ExperienceChatAvailability"], "available");
-        assert_eq!(p1["CanUsePlatformChat"], true);
-        assert_eq!(p1["CanUsePlatformChat2"], true);
-        assert_eq!(p1["CountryCode"], "FR");
-        assert_eq!(raw_app_storage["Username"], "Owl_JustABird");
-
-        // Second call should return false (already unlocked)
-        let modified_again = update_guac_policy_in_value(&mut raw_app_storage);
-        assert!(!modified_again);
-    }
-
-    #[test]
-    fn test_align_hop2_endpoint() {
-        let ep_a: SocketAddr = "162.159.192.1:500".parse().unwrap();
-        let ep_b = align_hop2_endpoint(ep_a);
-        assert_eq!(*ep_b.ip(), Ipv4Addr::new(188, 114, 97, 3));
-        assert_eq!(ep_b.port(), 2408);
-
-        let ep_a2: SocketAddr = "188.114.97.2:2408".parse().unwrap();
-        let ep_b2 = align_hop2_endpoint(ep_a2);
-        assert_eq!(*ep_b2.ip(), Ipv4Addr::new(162, 159, 192, 1));
-        assert_eq!(ep_b2.port(), 2408);
-
-        // Fallback when Hop 1 is on 188.114.96.1
-        let ep_a3: SocketAddr = "188.114.96.1:500".parse().unwrap();
-        let ep_b3 = align_hop2_endpoint(ep_a3);
-        assert_eq!(*ep_b3.ip(), Ipv4Addr::new(162, 159, 192, 1));
-        assert_eq!(ep_b3.port(), 2408);
-    }
-
-    #[test]
-    fn test_get_hop2_candidates() {
-        let candidates = get_hop2_candidates();
-        assert!(candidates.len() >= 5);
-        assert_eq!(candidates[0], "188.114.97.3:2408".parse().unwrap());
-        assert!(candidates.contains(&"188.114.96.1:2408".parse().unwrap()));
-    }
-
-    #[test]
-    fn test_get_anycast_candidates() {
-        let candidates = get_anycast_candidates();
-        assert!(
-            candidates.len() >= 30,
-            "Should have a robust candidate pool"
-        );
-        assert!(
-            candidates
-                .iter()
-                .any(|c| c.ip() == Ipv4Addr::new(162, 159, 192, 1) && c.port() == 500)
-        );
-        assert!(candidates.iter().any(|c| c.port() == 500));
-        assert!(candidates.iter().any(|c| c.port() == 1701));
-        assert!(candidates.iter().any(|c| c.port() == 4500));
-        assert!(candidates.iter().any(|c| c.port() == 2408));
-    }
-
-    #[test]
-    fn test_ensure_file_writable_restores_write_permissions() {
-        let temp_dir =
-            std::env::temp_dir().join(format!("warp_min_writable_{}", rand::random::<u32>()));
-        std::fs::create_dir_all(&temp_dir).unwrap();
-        let test_file = temp_dir.join("appStorage.json");
-
-        std::fs::write(&test_file, b"{\"test\": 123}").unwrap();
-
-        // 1. Set file as READ-ONLY
-        let meta = std::fs::metadata(&test_file).unwrap();
-        let mut perms = meta.permissions();
-        perms.set_readonly(true);
-        std::fs::set_permissions(&test_file, perms).unwrap();
-
-        // Verify it is currently read-only
-        assert!(
-            std::fs::metadata(&test_file)
-                .unwrap()
-                .permissions()
-                .readonly()
-        );
-
-        // 2. Run ensure_file_writable
-        let restored = ensure_file_writable(&test_file).expect("ensure_file_writable must succeed");
-        assert!(restored, "Should report that permissions were restored");
-
-        // 3. Verify it is no longer read-only
-        assert!(
-            !std::fs::metadata(&test_file)
-                .unwrap()
-                .permissions()
-                .readonly(),
-            "File must no longer be READ-ONLY"
-        );
-
-        // 4. Verify opening for writing succeeds (LocalStorageManager will not error)
-        let write_res = std::fs::OpenOptions::new().write(true).open(&test_file);
-        assert!(write_res.is_ok(), "Opening file for writing must succeed");
-
-        // 5. Calling again returns false (already writable)
-        let second_run = ensure_file_writable(&test_file).expect("second run must succeed");
-        assert!(
-            !second_run,
-            "Second run should report false since file is already writable"
-        );
-
-        // Cleanup
-        let _ = std::fs::remove_dir_all(&temp_dir);
-    }
-
-    #[test]
-    fn test_unlock_guac_policy_fresh_install_keys_absent() {
-        // When Roblox creates a default policy without any chat keys present initially
-        let mut raw_app_storage = serde_json::json!({
-            "AppConfiguration": serde_json::to_string(&serde_json::json!({
-                "GUAC:-1:app-policy": "{}",
-            })).unwrap()
-        });
-
-        let modified = update_guac_policy_in_value(&mut raw_app_storage);
-        assert!(
-            modified,
-            "Must insert chat keys even when missing from initial policy"
-        );
-
-        let app_config_str = raw_app_storage["AppConfiguration"].as_str().unwrap();
-        let app_config: serde_json::Value = serde_json::from_str(app_config_str).unwrap();
-        let p: serde_json::Value =
-            serde_json::from_str(app_config["GUAC:-1:app-policy"].as_str().unwrap()).unwrap();
-        assert_eq!(p["ExperienceChatAvailability"], "available");
-        assert_eq!(p["CanUsePlatformChat"], true);
-        assert_eq!(p["CanUsePlatformChat2"], true);
-        assert_eq!(p["CanSeeChatTab"], true);
-        assert_eq!(p["CanSeeChatTab2"], true);
-        assert_eq!(p["canSeeChatTerminology"], true);
-    }
-
-    #[test]
-    fn test_handshake_gate_blocks_tunnel_when_unestablished() {
-        let kp1 = api::generate_keypair();
-        let kp2 = api::generate_keypair();
-        let kp3 = api::generate_keypair();
-
-        let dummy_acc1 = api::WarpAccount {
-            id: "acc1".into(),
-            token: "tok1".into(),
-            private_key: kp1.private_b64,
-            public_key: kp1.public_b64,
-            peer_public_key: kp3.public_b64.clone(),
-            peer_endpoint: "162.159.192.1:500".into(),
-            local_ipv4: "172.16.0.2".into(),
-            local_ipv6: "2606:4700:110:8753:4f63:58a4:236f:9a32".into(),
-            reserved: [1, 2, 3],
-        };
-        let dummy_acc2 = api::WarpAccount {
-            id: "acc2".into(),
-            token: "tok2".into(),
-            private_key: kp2.private_b64,
-            public_key: kp2.public_b64,
-            peer_public_key: kp3.public_b64,
-            peer_endpoint: "188.114.97.3:2408".into(),
-            local_ipv4: "172.16.0.3".into(),
-            local_ipv6: "2606:4700:110:8753:4f63:58a4:236f:9a33".into(),
-            reserved: [4, 5, 6],
-        };
-        let tunnel = DualHopTunnel::new(
-            &dummy_acc1,
-            &dummy_acc2,
-            "162.159.192.1:500",
-            "188.114.97.3:2408",
-        )
-        .unwrap();
-
-        // Fresh tunnel has no active handshakes
-        assert!(
-            !verify_tunnel_handshake_health(&tunnel),
-            "Tunnel health gate MUST return false before handshakes complete to prevent black-hole routes (Error 279)"
-        );
-    }
-
-    #[test]
-    fn test_classify_roblox_datacenter_regions() {
-        // Subnet 128.116.0.0 - 128.116.31.255: US East (Ashburn, VA) / Global Anycast
-        let us_east = classify_roblox_datacenter("128.116.21.33");
-        assert!(us_east.contains("US East"), "128.116.21.33 must classify as US East");
-        assert!(us_east.contains("125-145ms"), "Must inform player of transatlantic expected ping");
-
-        let us_east_2 = classify_roblox_datacenter("128.116.31.33");
-        assert!(us_east_2.contains("US East"), "128.116.31.33 must classify as US East");
-
-        // Subnet 128.116.32.0 - 128.116.63.255: Europe (Frankfurt / London)
-        let eu = classify_roblox_datacenter("128.116.45.10");
-        assert!(eu.contains("Europe"), "128.116.45.10 must classify as Europe");
-        assert!(eu.contains("38-48ms"), "Must show ~38-48ms subsea wire latency for EU");
-
-        // Subnet 128.116.64.0 - 128.116.95.255: US Central
-        let central = classify_roblox_datacenter("128.116.70.1");
-        assert!(central.contains("US Central"), "128.116.70.1 must classify as US Central");
-
-        // Subnet 128.116.96.0 - 128.116.127.255: US West
-        let west = classify_roblox_datacenter("128.116.105.80");
-        assert!(west.contains("US West"), "128.116.105.80 must classify as US West");
-
-        // Non-Roblox IP
-        let ext = classify_roblox_datacenter("1.1.1.1");
-        assert_eq!(ext, "External Server");
-    }
-
-    #[test]
-    fn test_optimized_udp_socket_binds_to_inaddr_any_for_wfp_safety() {
-        let sock = create_optimized_udp_socket().expect("Socket creation must succeed");
-        let local_addr = sock.local_addr().expect("Local address must be queryable");
-        assert!(
-            local_addr.ip().is_unspecified(),
-            "Socket MUST bind to 0.0.0.0 (INADDR_ANY) to prevent ProtonVPN/WFP leak protection packet dropping"
-        );
-        assert_ne!(local_addr.port(), 0, "Socket must be assigned an ephemeral port");
-    }
-
-    #[test]
-    fn test_launcher_traffic_vs_gameplay_traffic_isolation() {
-        // Control plane API IP
-        let api_ip = Ipv4Addr::new(128, 116, 21, 3);
-        let api_list = vec![api_ip];
-
-        // 1. Synthesize a mock TCP SYN packet to apis.roblox.com:443 (Launcher Traffic)
-        let mut tcp_syn = vec![
-            0x45, 0x00, 0x00, 0x28, // IPv4 header, 40 bytes total len
-            0x12, 0x34, 0x40, 0x00, // ID, Don't Fragment
-            0x40, 0x06, 0x00, 0x00, // TTL 64, Protocol TCP (6), Checksum
-            10, 2, 0, 2,            // Src IP (ProtonVPN)
-            128, 116, 21, 3,        // Dst IP (apis.roblox.com)
-            0x1f, 0x90, 0x01, 0xbb, // Src port 8080, Dst port 443
-            0x00, 0x00, 0x00, 0x01, // Seq num
-            0x00, 0x00, 0x00, 0x00, // Ack num
-            0x50, 0x02, 0x72, 0x10, // Data offset 5, SYN flag (0x02), Window 29200
-            0x00, 0x00, 0x00, 0x00, // Checksum, Urgent pointer
-        ];
-        // Calculate IPv4 checksum
-        let ihl = (tcp_syn[0] & 0x0f) as usize * 4;
-        let mut csum: u32 = 0;
-        for i in (0..ihl).step_by(2) {
-            csum += u16::from_be_bytes([tcp_syn[i], tcp_syn[i + 1]]) as u32;
-        }
-        while (csum >> 16) > 0 {
-            csum = (csum & 0xffff) + (csum >> 16);
-        }
-        let ip_csum = !(csum as u16);
-        tcp_syn[10] = (ip_csum >> 8) as u8;
-        tcp_syn[11] = (ip_csum & 0xff) as u8;
-
-        // Assert that launcher traffic is recognized as control-plane TCP
-        assert!(
-            tunnel::is_roblox_control_plane_tcp(&tcp_syn, &api_list),
-            "Launcher HTTPS traffic to apis.roblox.com must be recognized as control-plane"
-        );
-        assert!(
-            !tunnel::is_roblox_gameplay_udp(&tcp_syn),
-            "Control plane TCP must never be misclassified as RakNet gameplay UDP"
-        );
-
-        // 2. Synthesize a mock UDP RakNet gameplay packet (128.116.31.33:54199)
-        let udp_gameplay = vec![
-            0x45, 0x00, 0x00, 0x20, // IPv4 header, 32 bytes
-            0x56, 0x78, 0x00, 0x00, // ID
-            0x40, 0x11, 0x00, 0x00, // TTL 64, Protocol UDP (17)
-            172, 16, 0, 2,          // Src IP (WARP-Gool)
-            128, 116, 31, 33,       // Dst IP (Roblox UDMUX instance)
-            0xd3, 0xb7, 0xd3, 0xb7, // Src port 54199, Dst port 54199
-            0x00, 0x0c, 0x00, 0x00, // UDP Len 12, Checksum
-            0x00, 0x00, 0x00, 0x00, // RakNet payload
-        ];
-        assert!(
-            tunnel::is_roblox_gameplay_udp(&udp_gameplay),
-            "UDP traffic to 128.116.31.33:54199 must be classified as RakNet gameplay UDP"
-        );
-        assert!(
-            !tunnel::is_roblox_control_plane_tcp(&udp_gameplay, &api_list),
-            "Gameplay UDP must never be misclassified as control-plane TCP"
-        );
-    }
-
-    #[test]
-    fn test_args_diagnose_flag_parsing() {
-        let args = Args::parse_from(["warp-min", "--diagnose"]);
-        assert!(args.diagnose);
-        assert!(!args.socks);
-    }
-
-    #[test]
-    fn test_synthetic_raknet_diagnostic_packet_structure() {
-        let src_ip = Ipv4Addr::new(172, 16, 0, 2);
-        let dst_ip = Ipv4Addr::new(128, 116, 5, 33);
-        let src_port: u16 = 49152;
-        let dst_port: u16 = 57259;
-        let payload = b"ROBLOX_SYNTHETIC_RAKNET_PING_PROBE_STAGE6";
-
-        let mut pkt = Vec::with_capacity(28 + payload.len());
-        // IPv4 Header (20 bytes)
-        pkt.push(0x45); // Version 4, IHL 5
-        pkt.push(0x00); // DSCP / ECN
-        let total_len = (28 + payload.len()) as u16;
-        pkt.extend_from_slice(&total_len.to_be_bytes());
-        pkt.extend_from_slice(&[0x12, 0x34]); // Identification
-        pkt.extend_from_slice(&[0x40, 0x00]); // Don't Fragment
-        pkt.push(64); // TTL
-        pkt.push(17); // Protocol UDP
-        pkt.extend_from_slice(&[0x00, 0x00]); // Checksum (placeholder)
-        pkt.extend_from_slice(&src_ip.octets());
-        pkt.extend_from_slice(&dst_ip.octets());
-
-        // UDP Header (8 bytes)
-        pkt.extend_from_slice(&src_port.to_be_bytes());
-        pkt.extend_from_slice(&dst_port.to_be_bytes());
-        let udp_len = (8 + payload.len()) as u16;
-        pkt.extend_from_slice(&udp_len.to_be_bytes());
-        pkt.extend_from_slice(&[0x00, 0x00]); // Checksum (placeholder)
-        pkt.extend_from_slice(payload);
-
-        // Verification of packet classification and fields
-        assert!(tunnel::is_roblox_gameplay_udp(&pkt));
-        assert_eq!(Ipv4Addr::new(pkt[12], pkt[13], pkt[14], pkt[15]), src_ip);
-        assert_eq!(Ipv4Addr::new(pkt[16], pkt[17], pkt[18], pkt[19]), dst_ip);
-        let ihl = (pkt[0] & 0x0f) as usize * 4;
-        let intercepted_dst_port = u16::from_be_bytes([pkt[ihl + 2], pkt[ihl + 3]]);
-        assert_eq!(intercepted_dst_port, 57259);
-    }
 }
